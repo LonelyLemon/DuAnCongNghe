@@ -112,7 +112,8 @@ def parse_emg_txt(path: Path):
     patient_info.setdefault("patient_id","unknown")
     patient_info["muscle"] = muscle
     patient_info["visit_datetime"] = visit_datetime
-    if freq_smpl: patient_info["sampling_hz"] = freq_smpl
+    if freq_smpl: 
+        patient_info["sampling_hz"] = freq_smpl
     return patient_info, meta, df_all
 
 def main():
