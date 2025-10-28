@@ -30,15 +30,25 @@ with open(EMG_JSON, "r", encoding="utf-16") as f:
 DEVICE = emg.get("device_info", {})
 PATIENT = emg.get("patient_info", {}) or {}
 TRACES: Dict[str, Any] = emg.get("traces", {})
+LONG: Dict[str, Any] = emg.get("long_trace", None)
 TRACE_IDS = sorted(TRACES.keys())
 
-def get_trace_xy(trace_id: str) -> Tuple[np.ndarray, np.ndarray, float]:
-    t = TRACES[trace_id]
-    dt_ms = float(t["trace_meta"].get("dt_ms", 0.0208333333))
-    arr = t["trace_data"]
+
+def _xy_from_trace_dict(t: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, float]:
+    dt_ms = float(t.get("trace_meta", {}).get("dt_ms", 0.0208333333))
+    arr = t.get("trace_data", [])
     time_ms = np.fromiter((p["time_ms"] for p in arr), dtype=float, count=len(arr))
     volt_uv = np.fromiter((p["voltage_uv"] for p in arr), dtype=float, count=len(arr))
     return time_ms, volt_uv, dt_ms
+
+
+def get_trace_xy(trace_id: str) -> Tuple[np.ndarray, np.ndarray, float]:
+    if trace_id == "long_trace":
+        if not LONG:
+            return np.array([]), np.array([]), 0.0
+        return _xy_from_trace_dict(LONG)
+    t = TRACES[trace_id]
+    return _xy_from_trace_dict(t)
 
 
 def downsample_stride(x: np.ndarray, y: np.ndarray, max_points: int = 120_000):
@@ -159,13 +169,10 @@ labels_table = dash_table.DataTable(
 )
 
 app.layout = html.Div(
-    style={"fontFamily": "system-ui, Arial", 
-           "padding": "14px", 
-           "maxWidth": "1280px", 
-           "margin": "0 auto"
-        },
+    style={"fontFamily": "system-ui, Arial", "padding": "14px", "maxWidth": "1280px", "margin": "0 auto"},
     children=[
         html.H2("EMG Trace Labeler (Plotly + Dash)"),
+
         html.Div([
             html.Div([html.H4("Patient Info"), patient_table],
                      style={"flex": "1", "minWidth": "340px", "marginRight": "16px"}),
@@ -176,7 +183,9 @@ app.layout = html.Div(
         html.Hr(),
 
         html.Div([
+            # Sweep controls
             html.Div([
+                html.H4("Sweep Traces (200)"),
                 html.Label("Trace"),
                 dcc.Dropdown(
                     id="trace-dd",
@@ -184,38 +193,55 @@ app.layout = html.Div(
                     value=TRACE_IDS[0] if TRACE_IDS else None,
                     clearable=False,
                 ),
-            ], style={"width": "240px", "marginRight": "12px"}),
-
-            html.Div([
-                html.Label("Window (ms)"),
-                dcc.Input(id="win-ms", type="number", value=500.0, min=10, step=10),
-            ], style={"width": "160px", "marginRight": "12px"}),
-
-            html.Div([
-                html.Label(""),
                 html.Div([
-                    html.Button("⟵ Pan", id="pan-left", n_clicks=0, style={"marginRight": "8px"}),
+                    html.Label("Window (ms)"),
+                    dcc.Input(id="win-ms", type="number", value=500.0, min=10, step=10),
+                ], style={"marginTop": "6px"}),
+                html.Div([
+                    html.Button("⟵ Pan", id="pan-left", n_clicks=0, style={"marginRight": "6px"}),
                     html.Button("Pan ⟶", id="pan-right", n_clicks=0),
-                ]),
-            ], style={"display": "flex", "alignItems": "end"}),
+                ], style={"marginTop": "6px"}),
+            ], style={"flex": "1", "minWidth": "320px", "marginRight": "12px"}),
 
+            # LongTrace controls
             html.Div([
-                html.Label(""),
+                html.H4("LongTrace (full session)"),
                 html.Div([
-                    html.Button("Add selections to table", id="add-selection", n_clicks=0, style={"marginRight": "8px"}),
-                    html.Button("Erase selections", id="erase-selection", n_clicks=0),
+                    html.Label("Window (ms)"),
+                    dcc.Input(id="win-ms-long", type="number", value=5000.0, min=10, step=10),
                 ]),
-            ], style={"display": "flex", "alignItems": "end", "marginLeft": "12px"}),
-        ], style={"display": "flex", "flexWrap": "wrap", "gap": "8px"}),
+                html.Div([
+                    html.Button("⟵ Pan (Long)", id="pan-left-long", n_clicks=0, style={"marginRight": "6px"}),
+                    html.Button("Pan ⟶ (Long)", id="pan-right-long", n_clicks=0),
+                ], style={"marginTop": "6px"}),
+            ], style={"flex": "1", "minWidth": "320px"}),
+        ], style={"display": "flex", "flexWrap": "wrap"}),
 
-        dcc.Graph(
-            id="trace-graph",
-            figure=go.Figure(),
-            style={"height": "62vh", "marginTop": "12px"},
-            config={"displaylogo": False, "modeBarButtonsToAdd": ["drawrect", "eraseshape"]},
-        ),
+        # Two parallel charts
+        html.Div([
+            dcc.Graph(
+                id="trace-graph",
+                figure=go.Figure(),
+                style={"height": "60vh"},
+                config={"displaylogo": False, "modeBarButtonsToAdd": ["drawrect", "eraseshape"]},
+            ),
+            dcc.Graph(
+                id="long-graph",
+                figure=go.Figure(),
+                style={"height": "60vh"},
+                config={"displaylogo": False, "modeBarButtonsToAdd": ["drawrect", "eraseshape"]},
+            ),
+        ], style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "12px", "marginTop": "12px"}),
 
         html.Div(id="selection-info", style={"marginTop": "8px", "fontSize": 14, "color": "#374151"}),
+
+        # Label actions
+        html.Div([
+            html.Button("Add Sweep selections to table", id="add-selection-sweep", n_clicks=0, style={"marginRight": "8px"}),
+            html.Button("Add LongTrace selections to table", id="add-selection-long", n_clicks=0, style={"marginRight": "12px"}),
+            html.Button("Erase selections (Sweep)", id="erase-selection-sweep", n_clicks=0, style={"marginRight": "8px"}),
+            html.Button("Erase selections (Long)", id="erase-selection-long", n_clicks=0),
+        ], style={"marginTop": "10px"}),
 
         html.Div([
             html.Button("Save labels", id="save-labels", n_clicks=0, style={"marginRight": "8px"}),
@@ -226,10 +252,15 @@ app.layout = html.Div(
         html.H4("Labels"),
         labels_table,
 
-        dcc.Store(id="xrange-store"),
-        dcc.Store(id="rects-store"),
+        # stores
+        dcc.Store(id="xrange-store"),   # Sweep Trace
+        dcc.Store(id="rects-store-sweep"),
+        
+        dcc.Store(id="xrange-store-long"),  # Long Trace
+        dcc.Store(id="rects-store-long"),
     ]
 )
+
 
 # ---------------- Callbacks ----------------
 @app.callback(
@@ -285,30 +316,93 @@ def update_plot(trace_id, win_ms, n_left, n_right, xrange_mem):
     store = {"trace_id": trace_id, "x0": x0, "x1": x1}
     return fig, store
 
+# -------- Long figure (parallel to sweep) --------
 @app.callback(
-    Output("rects-store", "data"),
-    Output("selection-info", "children"),
-    Input("trace-graph", "relayoutData"),
-    State("rects-store", "data"),
+    Output("long-graph", "figure"),
+    Output("xrange-store-long", "data"),
+    Input("win-ms-long", "value"),
+    Input("pan-left-long", "n_clicks"),
+    Input("pan-right-long", "n_clicks"),
+    State("xrange-store-long", "data"),
     prevent_initial_call=False
 )
-def on_relayout(relayout, cur_rects):
-    """
-    Ghi nhận **toàn bộ** vùng hiện có mỗi lần người dùng vẽ/chỉnh/sửa/xóa shape.
-    """
+def update_plot_long(win_ms, n_left, n_right, xrange_mem):
+    trace_id = "long_trace"
+    x, y, _ = get_trace_xy(trace_id)
+    x_ds, y_ds = downsample_stride(x, y)
+
+    if x.size == 0:
+        fig = go.Figure()
+        fig.update_layout(
+            margin=dict(l=40, r=20, t=30, b=40),
+            xaxis_title="Time (ms)",
+            yaxis_title="Voltage (µV)",
+            template="plotly_white"
+        )
+        return fig, None
+
+    if xrange_mem:
+        x0, x1 = float(xrange_mem.get("x0")), float(xrange_mem.get("x1"))
+    else:
+        x0, x1 = initial_window(x, float(win_ms or 5000.0))
+
+    pan_step = float(win_ms or 5000.0) / 2.0
+    trigger = ctx.triggered_id
+    if trigger == "pan-left-long" and n_left:
+        x0 = max(float(x[0]), x0 - pan_step); x1 = x0 + float(win_ms)
+    elif trigger == "pan-right-long" and n_right:
+        x1 = min(float(x[-1]), x1 + pan_step); x0 = x1 - float(win_ms)
+
+    if x0 < float(x[0]): x0, x1 = float(x[0]), float(x[0]) + float(win_ms)
+    if x1 > float(x[-1]): x1, x0 = float(x[-1]), float(x[-1]) - float(win_ms); x0 = max(x0, float(x[0]))
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x_ds, y=y_ds, mode="lines", name="long_trace"))
+    fig.update_layout(
+        margin=dict(l=40, r=20, t=30, b=40),
+        xaxis_title="Time (ms)",
+        yaxis_title="Voltage (µV)",
+        xaxis=dict(rangeslider=dict(visible=True), range=[x0, x1]),
+        template="plotly_white",
+        dragmode="pan",
+        shapes=[],
+    )
+    store = {"trace_id": trace_id, "x0": x0, "x1": x1}
+    return fig, store
+
+
+# Sweep selections
+@app.callback(
+    Output("rects-store-sweep", "data"),
+    Output("selection-info", "children"),
+    Input("trace-graph", "relayoutData"),
+    prevent_initial_call=False
+)
+def on_relayout_sweep(relayout):
     rects = extract_all_rects(relayout) if relayout else []
     if not rects:
-        return [], "Tip: Bấm 'Draw rectangle' để vẽ một hoặc nhiều vùng cần gán nhãn."
-    return rects, f"{len(rects)} selection(s) ready."
+        return [], "Tip: Use 'Draw rectangle' on either chart, then press the corresponding 'Add ... selections' button."
+    return rects, f"{len(rects)} selection(s) ready on Sweep chart."
+
+# Long selections
+@app.callback(
+    Output("rects-store-long", "data"),
+    Input("long-graph", "relayoutData"),
+    prevent_initial_call=False
+)
+def on_relayout_long(relayout):
+    rects = extract_all_rects(relayout) if relayout else []
+    return rects
+
 
 @app.callback(
     Output("labels-table", "data"),
-    Input("add-selection", "n_clicks"),
+    Input("add-selection-sweep", "n_clicks"),
     State("labels-table", "data"),
-    State("rects-store", "data"),
+    State("rects-store-sweep", "data"),
     State("trace-dd", "value"),
 )
-def add_selections_to_table(n_clicks, rows, rects, trace_id):
+def add_sel_sweep(n_clicks, rows, rects, trace_id):
     if not n_clicks:
         return no_update
     if not rects or not trace_id:
@@ -316,26 +410,58 @@ def add_selections_to_table(n_clicks, rows, rects, trace_id):
     new_rows = []
     for (x0, x1) in rects:
         start_ms, end_ms = (x0, x1) if x0 <= x1 else (x1, x0)
-        new_rows.append({
-            "start_ms": round(float(start_ms), 6),
-            "end_ms": round(float(end_ms), 6),
-            "trace_id": trace_id,
-            "label": "unknown",
-        })
+        new_rows.append({"start_ms": round(float(start_ms), 6),
+                         "end_ms": round(float(end_ms), 6),
+                         "trace_id": trace_id,
+                         "label": "unknown"})
     return rows + new_rows
 
 @app.callback(
+    Output("labels-table", "data", allow_duplicate=True),
+    Input("add-selection-long", "n_clicks"),
+    State("labels-table", "data"),
+    State("rects-store-long", "data"),
+    prevent_initial_call=True
+)
+def add_sel_long(n_clicks, rows, rects):
+    if not n_clicks:
+        return no_update
+    if not rects:
+        return rows
+    new_rows = []
+    for (x0, x1) in rects:
+        start_ms, end_ms = (x0, x1) if x0 <= x1 else (x1, x0)
+        new_rows.append({"start_ms": round(float(start_ms), 6),
+                         "end_ms": round(float(end_ms), 6),
+                         "trace_id": "long_trace",
+                         "label": "unknown"})
+    return rows + new_rows
+
+
+@app.callback(
     Output("trace-graph", "figure", allow_duplicate=True),
-    Output("rects-store", "data", allow_duplicate=True),
-    Input("erase-selection", "n_clicks"),
+    Output("rects-store-sweep", "data", allow_duplicate=True),
+    Input("erase-selection-sweep", "n_clicks"),
     State("trace-graph", "figure"),
     prevent_initial_call=True
 )
-def erase_shapes(n_clicks, fig):
-    if not n_clicks:
-        return no_update, no_update
+def erase_shapes_sweep(n_clicks, fig):
+    if not n_clicks: return no_update, no_update
     fig["layout"]["shapes"] = []
     return fig, []
+
+@app.callback(
+    Output("long-graph", "figure", allow_duplicate=True),
+    Output("rects-store-long", "data", allow_duplicate=True),
+    Input("erase-selection-long", "n_clicks"),
+    State("long-graph", "figure"),
+    prevent_initial_call=True
+)
+def erase_shapes_long(n_clicks, fig):
+    if not n_clicks: return no_update, no_update
+    fig["layout"]["shapes"] = []
+    return fig, []
+
 
 @app.callback(
     Output("labels-table", "data", allow_duplicate=True),
@@ -387,6 +513,7 @@ def save_labels(n_clicks, rows):
     Input("clear-labels", "n_clicks"),
     prevent_initial_call=True
 )
+
 def clear_labels(n_clicks):
     if not n_clicks:
         return no_update

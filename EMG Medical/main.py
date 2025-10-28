@@ -25,6 +25,62 @@ text = "\n".join(lines)
 
 
 # ----------- HELPERS -----------
+SWEEP_HDR_RE = re.compile(r"Sweep\s+Data\(mV\)<(\d+)>=")
+LONGTRACE_HDR_RE = re.compile(r"LongTrace\s+Data\(mV\)<(\d+)>=")
+
+def _is_section_header(line: str) -> bool:
+    return line.startswith("[") and line.endswith("]")
+
+def _is_kv_metadata(line: str) -> bool:
+    return bool(re.match(r"^[^0-9\-\s].*?=.+$", line))
+
+def collect_sweeps(all_lines):
+    sweeps = []
+    i = 0
+    while i < len(all_lines):
+        line = all_lines[i]
+        m = SWEEP_HDR_RE.search(line)
+        if m:
+            n_samples = int(m.group(1))
+            first = line.split("=", 1)[1]
+            chunk_parts = [first]
+            i += 1
+            while i < len(all_lines):
+                nxt = all_lines[i]
+                if SWEEP_HDR_RE.search(nxt) or LONGTRACE_HDR_RE.search(nxt):
+                    break
+                if _is_section_header(nxt) or _is_kv_metadata(nxt):
+                    break
+                chunk_parts.append(nxt)
+                i += 1
+            sweeps.append(("\n".join(chunk_parts), n_samples))
+            continue
+        i += 1
+    return sweeps
+
+def collect_longtrace(all_lines):
+    i = 0
+    while i < len(all_lines):
+        line = all_lines[i]
+        m = LONGTRACE_HDR_RE.search(line)
+        if m:
+            n_samples = int(m.group(1))
+            first = line.split("=", 1)[1]
+            chunk_parts = [first]
+            i += 1
+            while i < len(all_lines):
+                nxt = all_lines[i]
+                if SWEEP_HDR_RE.search(nxt) or LONGTRACE_HDR_RE.search(nxt):
+                    break
+                if _is_section_header(nxt) or _is_kv_metadata(nxt):
+                    break
+                chunk_parts.append(nxt)
+                i += 1
+            return ("\n".join(chunk_parts), n_samples)
+        i += 1
+    return (None, 0)
+
+
 def extract_value(key: str):
     pattern = rf"{re.escape(key)}=(.+)"
     m = re.search(pattern, text)
@@ -46,30 +102,6 @@ def parse_number_list(raw_chunk: str):
     s = raw_chunk.replace("/", " ").strip()
     nums = re.findall(r"-?\d+[,\.]\d+|-?\d+", s)
     return [float(x.replace(",", ".")) for x in nums]
-
-
-def collect_traces(all_lines):
-    traces_raw = []
-    i = 0
-    header_re = re.compile(r"(?:Sweep\s+Data|Averaged\s+Data)\(mV\)<\d+>=")
-    while i < len(all_lines):
-        line = all_lines[i]
-        if header_re.search(line):
-            first = line.split("=", 1)[1]
-            chunk_parts = [first]
-            i += 1
-            while i < len(all_lines):
-                nxt = all_lines[i]
-                if re.match(r".+=.+", nxt) and not re.match(r"^-?\d", nxt):
-                    break
-                if nxt.startswith("[") and nxt.endswith("]"):
-                    break
-                chunk_parts.append(nxt)
-                i += 1
-            traces_raw.append("\n".join(chunk_parts))
-            continue
-        i += 1
-    return traces_raw
 
 
 # ----------- PATIENT INFO -----------
@@ -106,14 +138,21 @@ device_info = {
 
 
 # ----------- TRACE DATA (ALL 200 TRACES) -----------
-traces_raw = collect_traces(lines)
+sweeps_raw = collect_sweeps(lines)
+assert len(sweeps_raw) == 200, f"Expected 200 sweeps trace, got {len(sweeps_raw)}"
 
+sweep_duration_ms = find_numeric_value("Sweep Duration", "ms") or 100.0
 
-dt_ms = 1.0 / (sampling_khz * 1000.0) * 1000.0 if (sampling_khz and sampling_khz > 0) else 0.0208333333
+dt_ms = 1_000.0 / (subsampled_khz * 1000.0)
 
 traces_dict = {}
-for idx, raw_chunk in enumerate(traces_raw, start=1):
+for idx, (raw_chunk, n_declared) in enumerate(sweeps_raw, start=1):
     mv_values = np.array(parse_number_list(raw_chunk), dtype=float)
+    if n_declared and n_declared != len(mv_values):
+        raise ValueError(f"Sweep {idx}: header count {n_declared} != parsed {len(mv_values)}")
+
+    dt_ms = float(sweep_duration_ms) / len(mv_values) if len(mv_values) else 0.0
+
     uv_values = mv_values * 1000.0
     time_ms = np.arange(len(uv_values), dtype=float) * dt_ms
 
@@ -122,7 +161,7 @@ for idx, raw_chunk in enumerate(traces_raw, start=1):
         "trace_meta": {
             "trace_index": idx,
             "num_samples": int(len(uv_values)),
-            "dt_ms": float(dt_ms),
+            "dt_ms": dt_ms,
         },
         "trace_data": [
             {"time_ms": float(t), "voltage_uv": float(v)}
@@ -130,17 +169,45 @@ for idx, raw_chunk in enumerate(traces_raw, start=1):
         ],
     }
 
+# Parse LongTrace Data
+long_raw, long_n = collect_longtrace(lines)
+long_trace = None
+
+if long_raw:
+    long_mv = np.array(parse_number_list(long_raw), dtype=float)
+    if long_n and long_n != len(long_mv):
+        raise ValueError(f"LongTrace: header count {long_n} != parsed {len(long_mv)}")
+    
+    if subsampled_khz and subsampled_khz > 0:
+        long_dt_ms = 1_000.0 / (subsampled_khz * 1000.0)
+    else:
+        long_dt_ms = 0.0
+
+    long_time_ms = np.arange(len(long_mv), dtype=float) * long_dt_ms
+    long_uv = long_mv * 1000.0
+
+    long_trace = {
+        "trace_meta": {
+            "num_samples": int(len(long_uv)),
+            "dt_ms": float(long_dt_ms),
+        },
+        "trace_data": [
+            {"time_ms": float(t), "voltage_uv": float(v)}
+            for t, v in zip(long_time_ms, long_uv)
+        ],
+    }
 
 # ----------- SAVE EMG DATA -----------
 emg_data = {
     "patient_info": patient_info,
     "device_info": device_info,
     "traces": traces_dict,
+    "long_trace": long_trace
 }
 
 with open(emg_data_path, "w", encoding="utf-16") as f:
     json.dump(emg_data, f, indent=2, ensure_ascii=False)
 
 print(f"✅ Saved EMG data to: {emg_data_path.name} (UTF-16)")
-print(f"📊 Total traces: {len(traces_raw)}")
+print(f"📊 Total traces: {len(sweeps_raw)}")
 print("🎉 Processing completed successfully!")

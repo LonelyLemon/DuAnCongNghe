@@ -1,2 +1,7 @@
 __pycache__/
 .venv
+
+# Ignore data files
+/data_processed/
+/labeled_data/
+/patient_data/
