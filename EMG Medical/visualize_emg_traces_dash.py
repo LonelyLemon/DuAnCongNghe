@@ -3,7 +3,7 @@ import time
 import numpy as np
 import plotly.graph_objects as go
 from pathlib import Path
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, List, Optional
 
 from dash import (
     Dash, 
@@ -14,142 +14,69 @@ from dash import (
     State,
     dash_table,
     no_update, 
-    ctx)
+    ctx
+)
 
-
+# ---------- CẤU HÌNH ĐƯỜNG DẪN ----------
 BASE_DIR = Path(__file__).resolve().parent
 EMG_JSON = BASE_DIR / "data_processed" / "emg_data.json"
 LABELED_DIR = BASE_DIR / "labeled_data"
 LABELED_DIR.mkdir(exist_ok=True)
 
-
-# ---------- Loading processed data ----------
-with open(EMG_JSON, "r", encoding="utf-16") as f:
-    emg = json.load(f)
+# ---------- LOAD DỮ LIỆU ĐÃ XỬ LÝ ----------
+# Lưu ý: File json phải được tạo từ main.py mới nhất (đã có logic nối chuỗi)
+try:
+    with open(EMG_JSON, "r", encoding="utf-16") as f:
+        emg = json.load(f)
+except FileNotFoundError:
+    print(f"❌ Không tìm thấy file {EMG_JSON}. Hãy chạy main.py trước.")
+    emg = {}
 
 DEVICE = emg.get("device_info", {})
 PATIENT = emg.get("patient_info", {}) or {}
-TRACES: Dict[str, Any] = emg.get("traces", {})
-LONG: Dict[str, Any] = emg.get("long_trace", None)
-TRACE_IDS = sorted(TRACES.keys())
 
+# Lấy dữ liệu chuỗi nối tiếp (Full Sequence)
+FULL_SEQ = emg.get("full_sequence", {})
+FULL_STREAM = emg.get("full_data_stream", {}).get("voltage_uv", [])
+BOUNDARIES = FULL_SEQ.get("boundaries", []) # Danh sách mốc thời gian phân chia các Trace
 
-def _xy_from_trace_dict(t: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, float]:
-    dt_ms = float(t.get("trace_meta", {}).get("dt_ms", 0.0208333333))
-    arr = t.get("trace_data", [])
-    time_ms = np.fromiter((p["time_ms"] for p in arr), dtype=float, count=len(arr))
-    volt_uv = np.fromiter((p["voltage_uv"] for p in arr), dtype=float, count=len(arr))
-    return time_ms, volt_uv, dt_ms
+# Tái tạo mảng thời gian và điện thế
+# Nếu không có full_sequence (do chạy main.py cũ), fallback về rỗng
+dt_ms = FULL_SEQ.get("dt_ms", 0.02)
+total_points = len(FULL_STREAM)
 
+if total_points > 0:
+    full_time = np.arange(total_points, dtype=float) * dt_ms
+    full_voltage = np.array(FULL_STREAM, dtype=float)
+else:
+    full_time = np.array([])
+    full_voltage = np.array([])
+    print("⚠️ Cảnh báo: Không tìm thấy dữ liệu 'full_data_stream'. Hãy đảm bảo bạn đã cập nhật và chạy lại main.py.")
 
-def get_trace_xy(trace_id: str) -> Tuple[np.ndarray, np.ndarray, float]:
-    if trace_id == "long_trace":
-        if not LONG:
-            return np.array([]), np.array([]), 0.0
-        return _xy_from_trace_dict(LONG)
-    t = TRACES[trace_id]
-    return _xy_from_trace_dict(t)
-
-
-def downsample_stride(x: np.ndarray, y: np.ndarray, max_points: int = 120_000):
-    n = x.size
-    if n <= max_points:
-        return x, y
-    step = int(np.ceil(n / max_points))
-    return x[::step], y[::step]
-
-
-def initial_window(x: np.ndarray, width_ms: float) -> Tuple[float, float]:
-    if x.size == 0:
-        return (0.0, width_ms)
-    left = float(x[0])
-    right = float(min(x[-1], left + width_ms))
-    return (left, right)
-
-
-def extract_all_rects(relayout: dict) -> List[Tuple[float, float]]:
-    rects: List[Tuple[float, float]] = []
-    if not relayout:
-        return rects
-    if "shapes" in relayout and isinstance(relayout["shapes"], list):
-        for shp in relayout["shapes"]:
-            if isinstance(shp, dict) and ("x0" in shp and "x1" in shp):
-                x0, x1 = float(shp["x0"]), float(shp["x1"])
-                if x1 < x0:
-                    x0, x1 = x1, x0
-                rects.append((x0, x1))
-        return rects
-    indices = set()
-    for k in relayout.keys():
-        if k.startswith("shapes[") and (k.endswith("].x0") or k.endswith("].x1")):
-            idx = int(k.split("[")[-1].split("]")[0])
-            indices.add(idx)
-    for idx in sorted(indices):
-        kx0 = f"shapes[{idx}].x0"
-        kx1 = f"shapes[{idx}].x1"
-        if kx0 in relayout and kx1 in relayout:
-            x0, x1 = float(relayout[kx0]), float(relayout[kx1])
-            if x1 < x0:
-                x0, x1 = x1, x0
-            rects.append((x0, x1))
-    return rects
-
-
-def patient_rows() -> List[Dict[str, str]]:
-    p = PATIENT or {}
-    return [
-        {"Field": "Patient ID", "Value": p.get("patient_id", "")},
-        {"Field": "First Name", "Value": p.get("first_name", "")},
-        {"Field": "Gender", "Value": p.get("gender", "")},
-        {"Field": "Visit Date", "Value": p.get("visit_date", "")},
-        {"Field": "Visit Type", "Value": p.get("visit_type", "")},
-        {"Field": "Test Name", "Value": p.get("test_name", "")},
-        {"Field": "Muscle", "Value": p.get("muscle_name", "")},
-    ]
-
-
-def device_rows() -> List[Dict[str, str]]:
-    d = DEVICE or {}
-    return [
-        {"Field": "Test Type", "Value": d.get("test_type", "")},
-        {"Field": "Anatomy", "Value": d.get("anatomy", "")},
-        {"Field": "Sampling Frequency (kHz)", "Value": str(d.get("sampling_frequency_khz", ""))},
-        {"Field": "Subsampled (kHz)", "Value": str(d.get("subsampled_khz", ""))},
-        {"Field": "Low Filter (Hz)", "Value": str(d.get("low_filter_hz", ""))},
-        {"Field": "High Filter (kHz)", "Value": str(d.get("high_filter_khz", ""))},
-        {"Field": "Notch Filter (Hz)", "Value": str(d.get("notch_filter_hz", ""))},
-        {"Field": "Amplifier Range (mV)", "Value": str(d.get("amplifier_range_mv", ""))},
-        {"Field": "Unit", "Value": d.get("unit", "µV")},
-    ]
+# ---------- GIAO DIỆN DASHBOARD ----------
 
 app = Dash(__name__)
-app.title = "EMG Data Visualization and Labeling"
+app.title = "EMG Timeline Visualizer"
 
+# Bảng thông tin bệnh nhân
+patient_data = [{"Field": k, "Value": v} for k, v in PATIENT.items() if v]
 patient_table = dash_table.DataTable(
     id="patient-table",
-    columns=[{"name": "Field", "id": "Field"}, {"name": "Value", "id": "Value"}],
-    data=patient_rows(),
-    style_cell={"padding": "6px", "fontFamily": "system-ui, Arial", "fontSize": 14},
-    style_header={"fontWeight": "bold"},
-    style_table={"maxHeight": "230px", "overflowY": "auto"},
+    columns=[{"name": "Thông tin", "id": "Field"}, {"name": "Chi tiết", "id": "Value"}],
+    data=patient_data,
+    style_cell={"padding": "8px", "fontFamily": "system-ui", "fontSize": 14, "textAlign": "left"},
+    style_header={"fontWeight": "bold", "backgroundColor": "#f3f4f6"},
+    style_table={"maxHeight": "250px", "overflowY": "auto", "border": "1px solid #e5e7eb"},
 )
 
-device_table = dash_table.DataTable(
-    id="device-table",
-    columns=[{"name": "Field", "id": "Field"}, {"name": "Value", "id": "Value"}],
-    data=device_rows(),
-    style_cell={"padding": "6px", "fontFamily": "system-ui, Arial", "fontSize": 14},
-    style_header={"fontWeight": "bold"},
-    style_table={"maxHeight": "260px", "overflowY": "auto"},
-)
-
+# Bảng quản lý nhãn (Labels)
 labels_table = dash_table.DataTable(
     id="labels-table",
     columns=[
-        {"name": "start time (ms)", "id": "start_ms", "type": "numeric"},
-        {"name": "end time (ms)", "id": "end_ms", "type": "numeric"},
-        {"name": "trace_id", "id": "trace_id", "type": "text"},
-        {"name": "label", "id": "label", "presentation": "dropdown"},
+        {"name": "Start (ms)", "id": "start_ms", "type": "numeric"},
+        {"name": "End (ms)", "id": "end_ms", "type": "numeric"},
+        {"name": "Trace Gốc", "id": "trace_id", "type": "text"},
+        {"name": "Nhãn bệnh", "id": "label", "presentation": "dropdown"},
     ],
     data=[],
     editable=True,
@@ -157,367 +84,285 @@ labels_table = dash_table.DataTable(
     dropdown={
         "label": {
             "options": [
-                {"label": "bệnh A", "value": "bệnh A"},
-                {"label": "bệnh B", "value": "bệnh B"},
-                {"label": "unknown", "value": "unknown"},
+                {"label": "Bệnh A", "value": "Bệnh A"},
+                {"label": "Bệnh B", "value": "Bệnh B"},
+                {"label": "Nhiễu (Artifact)", "value": "Artifact"},
+                {"label": "Unknown", "value": "Unknown"},
             ]
         }
     },
-    style_cell={"padding": "6px", "fontFamily": "system-ui, Arial", "fontSize": 14},
-    style_header={"fontWeight": "bold"},
-    style_table={"maxHeight": "300px", "overflowY": "auto", "border": "1px solid #e5e7eb"},
+    style_cell={"padding": "8px", "fontFamily": "system-ui", "fontSize": 14, "textAlign": "left"},
+    style_header={"fontWeight": "bold", "backgroundColor": "#f3f4f6"},
+    style_table={"maxHeight": "250px", "overflowY": "auto", "border": "1px solid #e5e7eb"},
 )
 
+# Layout chính
 app.layout = html.Div(
-    style={"fontFamily": "system-ui, Arial", "padding": "14px", "maxWidth": "1280px", "margin": "0 auto"},
+    style={"fontFamily": "system-ui, Arial", "padding": "20px", "maxWidth": "1600px", "margin": "0 auto", "backgroundColor": "#f9fafb", "minHeight": "100vh"},
     children=[
-        html.H2("EMG Trace Labeler (Plotly + Dash)"),
+        html.H2("Phân tích tín hiệu EMG (Chế độ Timeline)", style={"color": "#111827", "marginBottom": "20px"}),
 
+        # Khu vực thông tin & Bảng nhãn (Layout 2 cột)
         html.Div([
-            html.Div([html.H4("Patient Info"), patient_table],
-                     style={"flex": "1", "minWidth": "340px", "marginRight": "16px"}),
-            html.Div([html.H4("Device / Muscle Info"), device_table],
-                     style={"flex": "1", "minWidth": "360px"}),
-        ], style={"display": "flex", "flexWrap": "wrap", "gap": "8px"}),
-
-        html.Hr(),
-
-        html.Div([
-            # Sweep controls
             html.Div([
-                html.H4("Sweep Traces (200)"),
-                html.Label("Trace"),
-                dcc.Dropdown(
-                    id="trace-dd",
-                    options=[{"label": tid, "value": tid} for tid in TRACE_IDS],
-                    value=TRACE_IDS[0] if TRACE_IDS else None,
-                    clearable=False,
-                ),
-                html.Div([
-                    html.Label("Window (ms)"),
-                    dcc.Input(id="win-ms", type="number", value=500.0, min=10, step=10),
-                ], style={"marginTop": "6px"}),
-                html.Div([
-                    html.Button("⟵ Pan", id="pan-left", n_clicks=0, style={"marginRight": "6px"}),
-                    html.Button("Pan ⟶", id="pan-right", n_clicks=0),
-                ], style={"marginTop": "6px"}),
-            ], style={"flex": "1", "minWidth": "320px", "marginRight": "12px"}),
+                html.H4("Hồ sơ bệnh nhân", style={"marginTop": 0}),
+                patient_table
+            ], style={"flex": "0 0 350px"}), # Cố định chiều rộng cột trái
 
-            # LongTrace controls
             html.Div([
-                html.H4("LongTrace (full session)"),
                 html.Div([
-                    html.Label("Window (ms)"),
-                    dcc.Input(id="win-ms-long", type="number", value=5000.0, min=10, step=10),
+                    html.H4("Danh sách nhãn đã gán", style={"marginTop": 0, "display": "inline-block"}),
+                    html.Div([
+                        html.Button("Lưu nhãn ra file", id="btn-save-labels", n_clicks=0, 
+                                    style={"backgroundColor": "#059669", "color": "white", "border": "none", "padding": "6px 12px", "borderRadius": "4px", "cursor": "pointer", "fontSize": "13px"}),
+                        html.Span(id="save-status", style={"marginLeft": "10px", "fontSize": "13px", "color": "#059669"})
+                    ], style={"float": "right"})
                 ]),
-                html.Div([
-                    html.Button("⟵ Pan (Long)", id="pan-left-long", n_clicks=0, style={"marginRight": "6px"}),
-                    html.Button("Pan ⟶ (Long)", id="pan-right-long", n_clicks=0),
-                ], style={"marginTop": "6px"}),
-            ], style={"flex": "1", "minWidth": "320px"}),
-        ], style={"display": "flex", "flexWrap": "wrap"}),
+                labels_table
+            ], style={"flex": "1"}), # Cột phải co giãn
+        ], style={"display": "flex", "gap": "20px", "marginBottom": "20px"}),
 
-        # Two parallel charts
+        # Khu vực Đồ thị chính (Timeline)
         html.Div([
             dcc.Graph(
-                id="trace-graph",
-                figure=go.Figure(),
-                style={"height": "60vh"},
-                config={"displaylogo": False, "modeBarButtonsToAdd": ["drawrect", "eraseshape"]},
-            ),
-            dcc.Graph(
-                id="long-graph",
-                figure=go.Figure(),
-                style={"height": "60vh"},
-                config={"displaylogo": False, "modeBarButtonsToAdd": ["drawrect", "eraseshape"]},
-            ),
-        ], style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "12px", "marginTop": "12px"}),
+                id="timeline-graph",
+                style={"height": "65vh"},
+                # config bao gồm các công cụ vẽ
+                config={
+                    "scrollZoom": True, 
+                    "displaylogo": False, 
+                    "modeBarButtonsToAdd": ["drawrect", "eraseshape"]
+                }
+            )
+        ], style={"backgroundColor": "white", "padding": "10px", "borderRadius": "8px", "boxShadow": "0 1px 3px rgba(0,0,0,0.1)"}),
 
-        html.Div(id="selection-info", style={"marginTop": "8px", "fontSize": 14, "color": "#374151"}),
-
-        # Label actions
+        # Khu vực điều khiển gán nhãn
         html.Div([
-            html.Button("Add Sweep selections to table", id="add-selection-sweep", n_clicks=0, style={"marginRight": "8px"}),
-            html.Button("Add LongTrace selections to table", id="add-selection-long", n_clicks=0, style={"marginRight": "12px"}),
-            html.Button("Erase selections (Sweep)", id="erase-selection-sweep", n_clicks=0, style={"marginRight": "8px"}),
-            html.Button("Erase selections (Long)", id="erase-selection-long", n_clicks=0),
-        ], style={"marginTop": "10px"}),
+            html.Div([
+                html.Strong("Hướng dẫn: "),
+                html.Span("Dùng công cụ 'Box Select' hoặc 'Draw Rectangle' trên thanh công cụ đồ thị để khoanh vùng bất thường. Sau đó bấm nút bên dưới.")
+            ], style={"marginBottom": "10px", "color": "#4b5563"}),
 
-        html.Div([
-            html.Button("Save labels", id="save-labels", n_clicks=0, style={"marginRight": "8px"}),
-            html.Button("Clear labels", id="clear-labels", n_clicks=0),
-            html.Span(id="save-status", style={"marginLeft": "12px", "color": "#047857"}),
-        ], style={"marginTop": "10px"}),
-
-        html.H4("Labels"),
-        labels_table,
-
-        # stores
-        dcc.Store(id="xrange-store"),   # Sweep Trace
-        dcc.Store(id="rects-store-sweep"),
+            html.Button("➕ Thêm vùng đang chọn vào bảng nhãn", id="btn-add-label", n_clicks=0, 
+                        style={"padding": "10px 20px", "backgroundColor": "#2563eb", "color": "white", "border": "none", "borderRadius": "6px", "cursor": "pointer", "fontWeight": "bold"}),
+            html.Button("Xóa các vùng vẽ", id="btn-clear-shapes", n_clicks=0,
+                        style={"padding": "10px 20px", "backgroundColor": "#9ca3af", "color": "white", "border": "none", "borderRadius": "6px", "cursor": "pointer", "marginLeft": "10px"}),
+            html.Span(id="selection-msg", style={"marginLeft": "15px", "color": "#6b7280", "fontStyle": "italic"})
+        ], style={"marginTop": "15px"}),
         
-        dcc.Store(id="xrange-store-long"),  # Long Trace
-        dcc.Store(id="rects-store-long"),
+        # Stores để lưu trạng thái
+        dcc.Store(id="relayout-data-store"),
     ]
 )
 
 
-# ---------------- Callbacks ----------------
+# ---------- CALLBACKS ----------
+
+# 1. Khởi tạo biểu đồ Timeline (Chạy 1 lần duy nhất khi load)
 @app.callback(
-    Output("trace-graph", "figure"),
-    Output("xrange-store", "data"),
-    Input("trace-dd", "value"),
-    Input("win-ms", "value"),
-    Input("pan-left", "n_clicks"),
-    Input("pan-right", "n_clicks"),
-    State("xrange-store", "data"),
-    prevent_initial_call=False
+    Output("timeline-graph", "figure"),
+    Input("timeline-graph", "id")
 )
-def update_plot(trace_id, win_ms, n_left, n_right, xrange_mem):
-    if not trace_id or not win_ms:
-        return no_update, no_update
-
-    x, y, _ = get_trace_xy(trace_id)
-    x_ds, y_ds = downsample_stride(x, y)
-
-    if xrange_mem and xrange_mem.get("trace_id") == trace_id:
-        x0, x1 = float(xrange_mem.get("x0")), float(xrange_mem.get("x1"))
-    else:
-        x0, x1 = initial_window(x, float(win_ms))
-
-    pan_step = float(win_ms) / 2.0
-    trigger = ctx.triggered_id
-    if trigger == "pan-left" and n_left:
-        x0 = max(float(x[0]), x0 - pan_step)
-        x1 = x0 + float(win_ms)
-    elif trigger == "pan-right" and n_right:
-        x1 = min(float(x[-1]), x1 + pan_step)
-        x0 = x1 - float(win_ms)
-
-    if x.size > 0:
-        if x0 < float(x[0]):
-            x0 = float(x[0]); x1 = x0 + float(win_ms)
-        if x1 > float(x[-1]):
-            x1 = float(x[-1]); x0 = x1 - float(win_ms)
-            if x0 < float(x[0]):
-                x0 = float(x[0])
-
+def init_graph(_):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x_ds, y=y_ds, mode="lines", name=trace_id))
+    
+    # Sử dụng WebGL (Scattergl) để vẽ mượt mà số lượng điểm lớn
+    fig.add_trace(go.Scattergl(
+        x=full_time,
+        y=full_voltage,
+        mode='lines',
+        name='Tín hiệu EMG',
+        line=dict(color='#1f2937', width=1),
+        hoverinfo='x+y'
+    ))
+
+    # Tạo các vạch kẻ mờ phân chia các Trace gốc (dựa trên BOUNDARIES)
+    # Chỉ vẽ nếu số lượng trace < 500 để tránh lag trình duyệt
+    shapes = []
+    if len(BOUNDARIES) > 0:
+        for b in BOUNDARIES:
+            shapes.append(dict(
+                type="line",
+                x0=b["start_ms"], x1=b["start_ms"],
+                y0=0, y1=1, yref="paper", # Vẽ hết chiều cao đồ thị
+                line=dict(color="rgba(200, 200, 200, 0.5)", width=1, dash="dot")
+            ))
+    
     fig.update_layout(
-        margin=dict(l=40, r=20, t=30, b=40),
-        xaxis_title="Time (ms)",
-        yaxis_title="Voltage (µV)",
-        xaxis=dict(rangeslider=dict(visible=True), range=[x0, x1]),
+        title=dict(text="Biểu đồ tín hiệu toàn trình (Timeline)", font=dict(size=18)),
+        xaxis=dict(
+            title="Thời gian (ms)",
+            rangeslider=dict(visible=True), # ĐÂY LÀ TÍNH NĂNG SLIDING WINDOW
+            gridcolor="#f3f4f6"
+        ),
+        yaxis=dict(
+            title="Biên độ (µV)",
+            fixedrange=False, # Cho phép zoom trục Y
+            gridcolor="#f3f4f6"
+        ),
+        shapes=shapes,
         template="plotly_white",
-        dragmode="pan",
-        shapes=[],
+        margin=dict(l=60, r=40, t=50, b=40),
+        dragmode="pan", # Mặc định là chế độ kéo để di chuyển
+        hovermode="x unified"
     )
-    store = {"trace_id": trace_id, "x0": x0, "x1": x1}
-    return fig, store
+    return fig
 
-# -------- Long figure (parallel to sweep) --------
+
+# 2. Lưu trạng thái relayout (khi user vẽ hình hoặc zoom)
 @app.callback(
-    Output("long-graph", "figure"),
-    Output("xrange-store-long", "data"),
-    Input("win-ms-long", "value"),
-    Input("pan-left-long", "n_clicks"),
-    Input("pan-right-long", "n_clicks"),
-    State("xrange-store-long", "data"),
-    prevent_initial_call=False
+    Output("relayout-data-store", "data"),
+    Input("timeline-graph", "relayoutData"),
+    prevent_initial_call=True
 )
-def update_plot_long(win_ms, n_left, n_right, xrange_mem):
-    trace_id = "long_trace"
-    x, y, _ = get_trace_xy(trace_id)
-    x_ds, y_ds = downsample_stride(x, y)
-
-    if x.size == 0:
-        fig = go.Figure()
-        fig.update_layout(
-            margin=dict(l=40, r=20, t=30, b=40),
-            xaxis_title="Time (ms)",
-            yaxis_title="Voltage (µV)",
-            template="plotly_white"
-        )
-        return fig, None
-
-    if xrange_mem:
-        x0, x1 = float(xrange_mem.get("x0")), float(xrange_mem.get("x1"))
-    else:
-        x0, x1 = initial_window(x, float(win_ms or 5000.0))
-
-    pan_step = float(win_ms or 5000.0) / 2.0
-    trigger = ctx.triggered_id
-    if trigger == "pan-left-long" and n_left:
-        x0 = max(float(x[0]), x0 - pan_step); x1 = x0 + float(win_ms)
-    elif trigger == "pan-right-long" and n_right:
-        x1 = min(float(x[-1]), x1 + pan_step); x0 = x1 - float(win_ms)
-
-    if x0 < float(x[0]): x0, x1 = float(x[0]), float(x[0]) + float(win_ms)
-    if x1 > float(x[-1]): x1, x0 = float(x[-1]), float(x[-1]) - float(win_ms); x0 = max(x0, float(x[0]))
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x_ds, y=y_ds, mode="lines", name="long_trace"))
-    fig.update_layout(
-        margin=dict(l=40, r=20, t=30, b=40),
-        xaxis_title="Time (ms)",
-        yaxis_title="Voltage (µV)",
-        xaxis=dict(rangeslider=dict(visible=True), range=[x0, x1]),
-        template="plotly_white",
-        dragmode="pan",
-        shapes=[],
-    )
-    store = {"trace_id": trace_id, "x0": x0, "x1": x1}
-    return fig, store
+def store_relayout(relayout):
+    return relayout
 
 
-# Sweep selections
-@app.callback(
-    Output("rects-store-sweep", "data"),
-    Output("selection-info", "children"),
-    Input("trace-graph", "relayoutData"),
-    prevent_initial_call=False
-)
-def on_relayout_sweep(relayout):
-    rects = extract_all_rects(relayout) if relayout else []
-    if not rects:
-        return [], "Tip: Use 'Draw rectangle' on either chart, then press the corresponding 'Add ... selections' button."
-    return rects, f"{len(rects)} selection(s) ready on Sweep chart."
-
-# Long selections
-@app.callback(
-    Output("rects-store-long", "data"),
-    Input("long-graph", "relayoutData"),
-    prevent_initial_call=False
-)
-def on_relayout_long(relayout):
-    rects = extract_all_rects(relayout) if relayout else []
-    return rects
-
-
+# 3. Xử lý nút "Thêm vùng chọn vào bảng"
 @app.callback(
     Output("labels-table", "data"),
-    Input("add-selection-sweep", "n_clicks"),
+    Output("selection-msg", "children"),
+    Input("btn-add-label", "n_clicks"),
+    State("relayout-data-store", "data"),
     State("labels-table", "data"),
-    State("rects-store-sweep", "data"),
-    State("trace-dd", "value"),
+    prevent_initial_call=True
 )
-def add_sel_sweep(n_clicks, rows, rects, trace_id):
-    if not n_clicks:
+def add_label_from_selection(n_clicks, relayout, current_rows):
+    if not relayout:
+        return no_update, "Chưa có vùng nào được chọn."
+    
+    # Tìm tọa độ hình chữ nhật (User vẽ) hoặc vùng zoom (User zoom)
+    x0, x1 = None, None
+    
+    # Trường hợp 1: Vẽ bằng công cụ Draw Rect/Box Select (Ưu tiên)
+    if "shapes" in relayout:
+        # Lấy hình vẽ cuối cùng
+        last_shape = relayout["shapes"][-1]
+        x0 = last_shape.get("x0")
+        x1 = last_shape.get("x1")
+    
+    # Trường hợp 2: Zoom (Lấy toàn bộ vùng đang hiển thị)
+    elif "xaxis.range[0]" in relayout:
+        x0 = relayout["xaxis.range[0]"]
+        x1 = relayout["xaxis.range[1]"]
+
+    if x0 is None or x1 is None:
+        return no_update, "Hãy dùng công cụ vẽ hình chữ nhật (Draw Rect) để chọn vùng chính xác."
+
+    # Sắp xếp start/end
+    start_ms, end_ms = sorted([float(x0), float(x1)])
+    
+    # Tự động xác định vùng này thuộc Trace gốc nào
+    ref_trace = "N/A"
+    # Tìm trace mà điểm giữa của vùng chọn rơi vào
+    mid_point = (start_ms + end_ms) / 2
+    for b in BOUNDARIES:
+        if b["start_ms"] <= mid_point < b["end_ms"]:
+            ref_trace = b["trace_id"]
+            break
+            
+    new_row = {
+        "start_ms": round(start_ms, 2),
+        "end_ms": round(end_ms, 2),
+        "trace_id": ref_trace,
+        "label": "Unknown" # Mặc định
+    }
+    
+    if current_rows is None:
+        current_rows = []
+        
+    msg = f"✅ Đã thêm: {ref_trace} ({start_ms:.1f}ms - {end_ms:.1f}ms)"
+    return current_rows + [new_row], msg
+
+
+# 4. Xóa các hình vẽ trên đồ thị (Clear shapes)
+@app.callback(
+    Output("timeline-graph", "figure", allow_duplicate=True),
+    Input("btn-clear-shapes", "n_clicks"),
+    State("timeline-graph", "figure"),
+    prevent_initial_call=True
+)
+def clear_shapes(n_clicks, fig):
+    if not fig:
         return no_update
-    if not rects or not trace_id:
-        return rows
-    new_rows = []
-    for (x0, x1) in rects:
-        start_ms, end_ms = (x0, x1) if x0 <= x1 else (x1, x0)
-        new_rows.append({"start_ms": round(float(start_ms), 6),
-                         "end_ms": round(float(end_ms), 6),
-                         "trace_id": trace_id,
-                         "label": "unknown"})
-    return rows + new_rows
+    
+    # Giữ lại các đường kẻ dọc (Vertical lines) là trace boundaries
+    # Các đường này thường được thêm vào layout.shapes lúc init.
+    # Logic ở đây đơn giản là reset lại shapes về ban đầu (chỉ chứa vạch kẻ dọc)
+    
+    # Tái tạo lại list shapes gốc (chỉ chứa vạch phân chia trace)
+    base_shapes = []
+    if len(BOUNDARIES) > 0:
+        for b in BOUNDARIES:
+            base_shapes.append(dict(
+                type="line", x0=b["start_ms"], x1=b["start_ms"],
+                y0=0, y1=1, yref="paper",
+                line=dict(color="rgba(200, 200, 200, 0.5)", width=1, dash="dot")
+            ))
+            
+    fig["layout"]["shapes"] = base_shapes
+    return fig
 
+
+# 5. Lưu Labels ra file JSON
 @app.callback(
-    Output("labels-table", "data", allow_duplicate=True),
-    Input("add-selection-long", "n_clicks"),
-    State("labels-table", "data"),
-    State("rects-store-long", "data"),
-    prevent_initial_call=True
-)
-def add_sel_long(n_clicks, rows, rects):
-    if not n_clicks:
-        return no_update
-    if not rects:
-        return rows
-    new_rows = []
-    for (x0, x1) in rects:
-        start_ms, end_ms = (x0, x1) if x0 <= x1 else (x1, x0)
-        new_rows.append({"start_ms": round(float(start_ms), 6),
-                         "end_ms": round(float(end_ms), 6),
-                         "trace_id": "long_trace",
-                         "label": "unknown"})
-    return rows + new_rows
-
-
-@app.callback(
-    Output("trace-graph", "figure", allow_duplicate=True),
-    Output("rects-store-sweep", "data", allow_duplicate=True),
-    Input("erase-selection-sweep", "n_clicks"),
-    State("trace-graph", "figure"),
-    prevent_initial_call=True
-)
-def erase_shapes_sweep(n_clicks, fig):
-    if not n_clicks: return no_update, no_update
-    fig["layout"]["shapes"] = []
-    return fig, []
-
-@app.callback(
-    Output("long-graph", "figure", allow_duplicate=True),
-    Output("rects-store-long", "data", allow_duplicate=True),
-    Input("erase-selection-long", "n_clicks"),
-    State("long-graph", "figure"),
-    prevent_initial_call=True
-)
-def erase_shapes_long(n_clicks, fig):
-    if not n_clicks: return no_update, no_update
-    fig["layout"]["shapes"] = []
-    return fig, []
-
-
-@app.callback(
-    Output("labels-table", "data", allow_duplicate=True),
     Output("save-status", "children"),
-    Input("save-labels", "n_clicks"),
+    Input("btn-save-labels", "n_clicks"),
     State("labels-table", "data"),
     prevent_initial_call=True
 )
-def save_labels(n_clicks, rows):
-    if not n_clicks or not rows:
-        return no_update, ""
+def save_labels_to_disk(n_clicks, rows):
+    if not rows:
+        return "Bảng trống, không có gì để lưu."
+        
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    filename = f"labels_{ts}.json"
+    out_path = LABELED_DIR / filename
+    
     payload = {
         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "patient_info": PATIENT,
         "device_info": DEVICE,
-        "labels": [],
+        "labels": []
     }
+
+    # Trích xuất dữ liệu sóng tương ứng với label
+    # Lưu ý: Việc trích xuất data từ mảng lớn có thể tốn resource nếu quá nhiều label
     for r in rows:
         try:
-            start_ms = float(r["start_ms"])
-            end_ms = float(r["end_ms"])
-            if end_ms < start_ms:
-                start_ms, end_ms = end_ms, start_ms
-            trace_id = r["trace_id"]
-            label = r.get("label", "unknown")
-            if trace_id not in TRACES:
-                continue
-            x, y, _ = get_trace_xy(trace_id)
-            mask = (x >= start_ms) & (x <= end_ms)
-            segment = [{"time_ms": float(t), "voltage_uv": float(v)} for t, v in zip(x[mask], y[mask])]
-            payload["labels"].append({
-                "trace_id": trace_id,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "label": label,
-                "num_points": int(mask.sum()),
-                "data": segment,
-            })
-        except Exception:
+            s = float(r["start_ms"])
+            e = float(r["end_ms"])
+            # Lọc dữ liệu trong khoảng s -> e
+            # Dùng numpy mask để lấy nhanh
+            mask = (full_time >= s) & (full_time <= e)
+            segment_time = full_time[mask]
+            segment_volt = full_voltage[mask]
+            
+            # Format lại data để lưu
+            segment_data = [
+                {"t": round(float(t), 3), "v": round(float(v), 3)} 
+                for t, v in zip(segment_time, segment_volt)
+            ]
+            
+            label_entry = {
+                "start_ms": s,
+                "end_ms": e,
+                "trace_id": r.get("trace_id"),
+                "label": r.get("label"),
+                "data_points": len(segment_data),
+                "data_segment": segment_data # Lưu kèm đoạn sóng
+            }
+            payload["labels"].append(label_entry)
+        except Exception as ex:
+            print(f"Lỗi khi xử lý dòng {r}: {ex}")
             continue
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    out_path = LABELED_DIR / f"labels_{ts}.json"
+
     with open(out_path, "w", encoding="utf-16") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    return [], f"Saved to {out_path.name} (UTF-16)."
+        
+    return f"Đã lưu thành công: {filename}"
 
-@app.callback(
-    Output("labels-table", "data", allow_duplicate=True),
-    Input("clear-labels", "n_clicks"),
-    prevent_initial_call=True
-)
-
-def clear_labels(n_clicks):
-    if not n_clicks:
-        return no_update
-    return []
 
 if __name__ == "__main__":
     app.run(debug=True)

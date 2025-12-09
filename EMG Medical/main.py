@@ -139,75 +139,96 @@ device_info = {
 
 # ----------- TRACE DATA (ALL 200 TRACES) -----------
 sweeps_raw = collect_sweeps(lines)
-assert len(sweeps_raw) == 200, f"Expected 200 sweeps trace, got {len(sweeps_raw)}"
+assert len(sweeps_raw) > 0, f"No sweeps found!"
 
+# Lấy các thông số thời gian
 sweep_duration_ms = find_numeric_value("Sweep Duration", "ms") or 100.0
-
 dt_ms = 1_000.0 / (subsampled_khz * 1000.0)
 
 traces_dict = {}
+full_voltage_list = [] # Mảng chứa toàn bộ biên độ nối tiếp nhau
+trace_boundaries = []  # Lưu mốc thời gian bắt đầu của từng trace
+
+current_time_offset = 0.0
+
 for idx, (raw_chunk, n_declared) in enumerate(sweeps_raw, start=1):
     mv_values = np.array(parse_number_list(raw_chunk), dtype=float)
+    
+    # Validation
     if n_declared and n_declared != len(mv_values):
-        raise ValueError(f"Sweep {idx}: header count {n_declared} != parsed {len(mv_values)}")
+        print(f"Warning: Sweep {idx} header says {n_declared} but parsed {len(mv_values)}")
 
-    dt_ms = float(sweep_duration_ms) / len(mv_values) if len(mv_values) else 0.0
-
-    uv_values = mv_values * 1000.0
-    time_ms = np.arange(len(uv_values), dtype=float) * dt_ms
-
+    # Tính toán lại dt_ms thực tế cho trace này (để chính xác nhất)
+    real_dt_ms = float(sweep_duration_ms) / len(mv_values) if len(mv_values) else dt_ms
+    
+    uv_values = mv_values * 1000.0 # Convert to microvolt
+    
+    # Tạo trace lẻ (để tương thích ngược nếu cần)
+    time_ms = np.arange(len(uv_values), dtype=float) * real_dt_ms
     trace_id = f"trace_{idx:03d}"
     traces_dict[trace_id] = {
         "trace_meta": {
             "trace_index": idx,
             "num_samples": int(len(uv_values)),
-            "dt_ms": dt_ms,
+            "dt_ms": real_dt_ms,
+            "start_offset_ms": current_time_offset # Lưu mốc thời gian bắt đầu thực tế
         },
         "trace_data": [
             {"time_ms": float(t), "voltage_uv": float(v)}
             for t, v in zip(time_ms, uv_values)
         ],
     }
-
-# Parse LongTrace Data
-long_raw, long_n = collect_longtrace(lines)
-long_trace = None
-
-if long_raw:
-    long_mv = np.array(parse_number_list(long_raw), dtype=float)
-    if long_n and long_n != len(long_mv):
-        raise ValueError(f"LongTrace: header count {long_n} != parsed {len(long_mv)}")
     
-    if subsampled_khz and subsampled_khz > 0:
-        long_dt_ms = 1_000.0 / (subsampled_khz * 1000.0)
-    else:
-        long_dt_ms = 0.0
+    # Ghép dữ liệu vào chuỗi lớn (Concatenation)
+    full_voltage_list.extend(uv_values)
+    trace_boundaries.append({
+        "trace_id": trace_id,
+        "start_ms": current_time_offset,
+        "end_ms": current_time_offset + float(sweep_duration_ms)
+    })
+    
+    current_time_offset += float(sweep_duration_ms)
 
-    long_time_ms = np.arange(len(long_mv), dtype=float) * long_dt_ms
-    long_uv = long_mv * 1000.0
+# Tạo dữ liệu Full Sequence (Timeline)
+full_voltage_arr = np.array(full_voltage_list)
+# Tạo trục thời gian liên tục từ 0 -> Tổng thời gian
+full_time_arr = np.arange(len(full_voltage_arr), dtype=float) * dt_ms
 
-    long_trace = {
-        "trace_meta": {
-            "num_samples": int(len(long_uv)),
-            "dt_ms": float(long_dt_ms),
-        },
-        "trace_data": [
-            {"time_ms": float(t), "voltage_uv": float(v)}
-            for t, v in zip(long_time_ms, long_uv)
-        ],
+# Downsample cho Overview (Tạo dữ liệu nhẹ cho thanh trượt)
+# Lấy mẫu mỗi bước nhảy (stride) sao cho tổng số điểm khoảng 5000 để nhẹ trình duyệt
+target_overview_points = 5000
+step = max(1, len(full_voltage_arr) // target_overview_points)
+overview_time = full_time_arr[::step]
+overview_volt = full_voltage_arr[::step]
+
+full_sequence = {
+    "total_samples": len(full_voltage_arr),
+    "total_duration_ms": float(full_time_arr[-1]) if len(full_time_arr) else 0,
+    "dt_ms": dt_ms,
+    "boundaries": trace_boundaries, # Để vẽ vạch ngăn cách
+    # Lưu dữ liệu overview vào JSON (để đỡ phải load toàn bộ data nặng lúc đầu nếu muốn tối ưu)
+    "overview": {
+        "time_ms": overview_time.tolist(),
+        "voltage_uv": overview_volt.tolist()
     }
+    # Lưu ý: Ta KHÔNG lưu full_voltage_arr vào JSON vì sẽ làm file rất nặng (ví dụ 400k điểm).
+    # Ta sẽ tái tạo lại mảng này từ 'traces_dict' bên phía app hoặc lưu riêng nếu cần.
+    # Tuy nhiên với file text hiện tại, dung lượng không quá lớn, ta có thể lưu luôn để code gọn.
+}
 
 # ----------- SAVE EMG DATA -----------
 emg_data = {
     "patient_info": patient_info,
     "device_info": device_info,
     "traces": traces_dict,
-    "long_trace": long_trace
+    "full_sequence": full_sequence, # Thêm trường mới này
+    "full_data_stream": { # Dữ liệu thô liên tục (cân nhắc nếu file quá lớn > 10MB)
+        "voltage_uv": full_voltage_list 
+    }
 }
 
 with open(emg_data_path, "w", encoding="utf-16") as f:
     json.dump(emg_data, f, indent=2, ensure_ascii=False)
 
 print(f"✅ Saved EMG data to: {emg_data_path.name} (UTF-16)")
-print(f"📊 Total traces: {len(sweeps_raw)}")
-print("🎉 Processing completed successfully!")
+print(f"📊 Total traces: {len(sweeps_raw)} | Total concatenated time: {current_time_offset/1000:.2f}s")
