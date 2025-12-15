@@ -96,14 +96,38 @@ app.layout = html.Div([
 )
 def init_graph(_):
     fig = go.Figure()
-    fig.add_trace(go.Scattergl(x=full_time, y=full_voltage, mode='lines', line=dict(color='#374151', width=1), name="EMG"))
+
+    fig.add_trace(go.Scattergl(
+        x=full_time, 
+        y=full_voltage, 
+        mode='lines', 
+        line=dict(color="#2C72E4", width=1), 
+        name="EMG"
+    ))
     
-    shapes = [dict(type="line", x0=b["start_ms"], x1=b["start_ms"], y0=0, y1=1, yref="paper", line=dict(color="rgba(0,0,0,0.1)")) for b in boundaries[:500]]
+    limit_shapes = boundaries[:200] if len(boundaries) > 200 else boundaries
+    shapes = [dict(
+        type="line", 
+        x0=b["start_ms"], 
+        x1=b["start_ms"], 
+        y0=0, 
+        y1=1, 
+        yref="paper", 
+        line=dict(color="rgba(0,0,0,0.1)")
+    ) for b in limit_shapes]
     
+    initial_range_end = boundaries[0]["end_ms"] if boundaries else 100.0
+
     fig.update_layout(
-        xaxis=dict(rangeslider=dict(visible=True), title="Time (ms)"),
+        xaxis=dict(
+            title="Time (ms)",
+            rangeslider=dict(visible=True),
+            range=[0, initial_range_end]   
+        ),
         yaxis=dict(title="Amplitude (µV)"),
-        shapes=shapes, template="plotly_white", margin=dict(l=50, r=20, t=20, b=40)
+        shapes=shapes,
+        template="plotly_white",
+        margin=dict(l=50, r=20, t=20, b=40)
     )
     return fig
 
