@@ -1,4 +1,8 @@
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from src.database.db_manager import init_db, add_patient_if_not_exists, add_recording
 from src.processing.loader import load_natus_txt
 

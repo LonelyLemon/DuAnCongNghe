@@ -81,7 +81,6 @@ def add_recording(patient_id, visit_date, test_name, file_path, duration_ms=0):
     conn = get_connection()
     cur = conn.cursor()
     
-    # Kiểm tra tránh trùng lặp file
     cur.execute("SELECT id FROM recordings WHERE file_path = ?", (str(file_path),))
     row = cur.fetchone()
     
@@ -115,7 +114,12 @@ def get_all_recordings():
 def get_recording_by_id(rec_id):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM recordings WHERE id = ?", (rec_id,))
+    cur.execute('''
+        SELECT r.*, p.full_name, p.patient_code 
+        FROM recordings r
+        JOIN patients p ON r.patient_id = p.id
+        WHERE r.id = ?
+    ''', (rec_id,))
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None

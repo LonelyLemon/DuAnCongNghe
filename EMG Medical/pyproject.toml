@@ -6,8 +6,11 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dash>=3.2.0",
+    "kaleido>=1.2.0",
     "matplotlib>=3.10.7",
     "numpy>=2.3.3",
     "pandas>=2.3.3",
     "plotly>=6.3.1",
+    "scipy>=1.16.3",
+    "xhtml2pdf>=0.2.17",
 ]
