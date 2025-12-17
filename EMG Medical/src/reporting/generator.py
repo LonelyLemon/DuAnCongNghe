@@ -31,7 +31,14 @@ def generate_pdf_buffer(patient_info, rec_info, labels_data):
     - rec_info: dict thông tin bản ghi
     - labels_data: list các dict chứa {stats, time_arr, volt_arr, label_type...}
     """
+    conclusion_text = rec_info.get("clinical_conclusion", "")
+    if conclusion_text:
+        conclusion_html = conclusion_text.replace("\n", "<br/>")
+    else:
+        conclusion_html = "<em>Chưa có kết luận lâm sàng.</em>"
+
     
+
     # 1. HTML Template
     html_content = f"""
     <html>
@@ -69,6 +76,10 @@ def generate_pdf_buffer(patient_info, rec_info, labels_data):
         
         <hr style="border: 0; border-top: 1px solid #ddd;" />
         
+        <h2>KẾT LUẬN & KHUYẾN NGHỊ</h2>
+        <div class="conclusion-box">
+            {conclusion_html}
+        </div>
         <h2>KẾT QUẢ PHÂN TÍCH CHI TIẾT ({len(labels_data)} vùng)</h2>
     """
 

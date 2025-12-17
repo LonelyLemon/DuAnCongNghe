@@ -36,6 +36,13 @@ def init_db():
             FOREIGN KEY(patient_id) REFERENCES patients(id)
         )
     ''')
+
+    try:
+        cursor.execute("ALTER TABLE recordings ADD COLUMN clinical_conclusion TEXT")
+        print("--- [DB] Đã thêm cột 'clinical_conclusion' vào bảng recordings ---")
+    except sqlite3.OperationalError:
+        pass
+
     # Bảng Labels
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS labels (
@@ -189,5 +196,33 @@ def delete_all_labels_by_recording(rec_id):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM labels WHERE recording_id = ?", (rec_id,))
+    conn.commit()
+    conn.close()
+
+def delete_recording(rec_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("SELECT file_path FROM recordings WHERE id = ?", (rec_id,))
+        row = cur.fetchone()
+        file_path = row['file_path'] if row else None
+        
+        cur.execute("DELETE FROM labels WHERE recording_id = ?", (rec_id,))
+        
+        cur.execute("DELETE FROM recordings WHERE id = ?", (rec_id,))
+        
+        conn.commit()
+        return file_path
+    except Exception as e:
+        print(f"Lỗi khi xóa DB: {e}")
+        return None
+    finally:
+        conn.close()
+
+def update_recording_conclusion(rec_id, text):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE recordings SET clinical_conclusion = ? WHERE id = ?", (text, rec_id))
     conn.commit()
     conn.close()

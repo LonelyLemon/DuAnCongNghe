@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -18,6 +19,8 @@ from src.database.db_manager import (
     add_recording, init_db,
     get_all_label_defs, add_label_def,
     delete_all_labels_by_recording,
+    delete_recording,
+    update_recording_conclusion,
 )
 from src.processing.loader import get_data_slice, get_downsampled_data, parse_natus_content
 from src.processing.stats import calculate_clinical_stats
@@ -69,7 +72,19 @@ def layout_home():
         ]),
         
         html.H3("Danh sách bản ghi", style={"marginTop": "20px"}),
-        dcc.Input(id="search-input", type="text", placeholder="🔍 Tìm bệnh nhân...", style={"padding": "8px", "width": "300px", "marginBottom": "10px"}),
+        html.Div([
+            dcc.Input(id="search-input", type="text", placeholder="🔍 Tìm bệnh nhân...", 
+                      style={"padding": "8px", "width": "300px", "border": "1px solid #ccc", "borderRadius": "4px"}),
+            
+            html.Button("🗑️ Xóa bản ghi đã chọn", id="btn-delete-rec", 
+                        style={"marginLeft": "10px", "padding": "8px 15px", "background": "#ef4444", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer", "display": "none"}, # Mặc định ẩn, hiện khi chọn dòng
+            ),
+        ], style={"display": "flex", "alignItems": "center", "marginBottom": "10px"}),
+        
+        dcc.ConfirmDialog(
+            id='confirm-delete-dialog',
+            message='Bạn có chắc chắn muốn xóa bản ghi này không? Hành động này không thể hoàn tác.',
+        ),
         
         dash_table.DataTable(
             id="table-recordings",
@@ -83,7 +98,9 @@ def layout_home():
             data=table_data,
             style_cell={"padding": "10px", "textAlign": "left"},
             style_header={"backgroundColor": "#f3f4f6", "fontWeight": "bold"},
-            page_size=10
+            page_size=10,
+            row_selectable="single",
+            selected_rows=[],
         )
     ])
 
@@ -97,11 +114,12 @@ def create_labels_table_component(rec_id):
     all_defs = {d['code']: d for d in get_all_label_defs()}
     
     header = html.Tr([
-        html.Th("Trace", style={"textAlign": "left"}), 
-        html.Th("Start", style={"textAlign": "right"}), 
-        html.Th("End", style={"textAlign": "right"}), 
+        html.Th("Trace", style={"textAlign": "center"}), 
+        html.Th("Start", style={"textAlign": "center"}), 
+        html.Th("End", style={"textAlign": "center"}), 
         html.Th("Loại", style={"textAlign": "center"}), 
-        html.Th("P2P (µV)", style={"textAlign": "right"}), 
+        html.Th("P2P (µV)", style={"textAlign": "center"}),
+        html.Th("RMS (µV)", style={"textAlign": "center"}),
         html.Th("Xóa", style={"textAlign": "center"})
     ])
     
@@ -109,11 +127,12 @@ def create_labels_table_component(rec_id):
     for l in labels:
         lbl_def = all_defs.get(l['label_type'], {"name": l['label_type'], "color": "black"})
         rows.append(html.Tr([
-            html.Td(l['trace_id']),
-            html.Td(f"{l['start_ms']:.1f}", style={"textAlign": "right"}),
-            html.Td(f"{l['end_ms']:.1f}", style={"textAlign": "right"}),
+            html.Td(l['trace_id'], style={"textAlign": "center"}),
+            html.Td(f"{l['start_ms']:.1f}", style={"textAlign": "center"}),
+            html.Td(f"{l['end_ms']:.1f}", style={"textAlign": "center"}),
             html.Td(lbl_def['name'], style={"color": lbl_def['color'], "fontWeight": "bold", "textAlign": "center"}),
-            html.Td(f"{l['p2p_uv']}", style={"textAlign": "right"}),
+            html.Td(f"{l['p2p_uv']}", style={"textAlign": "center"}),
+            html.Td(f"{l['rms_uv']}", style={"textAlign": "center"}),
             html.Td(html.Button("❌", id={'type': 'del-btn', 'index': l['id']}, style={"border":"none", "background":"transparent", "cursor":"pointer"}), style={"textAlign": "center"})
         ]))
     
@@ -138,6 +157,8 @@ def layout_analysis(rec_id):
 
     label_defs = get_all_label_defs()
     dropdown_options = [{"label": l["name"], "value": l["code"]} for l in label_defs]
+
+    saved_conclusion = rec.get("clinical_conclusion", "") or ""
 
     return html.Div([
         dcc.Store(id="current-rec-id", data=rec_id),
@@ -237,6 +258,21 @@ def layout_analysis(rec_id):
 
         html.Div(id="labels-table-container", children=create_labels_table_component(rec_id)),
 
+        # 5. TRÌNH SOẠN THẢO KẾT LUẬN
+        html.Hr(style={"marginTop": "30px", "borderTop": "2px solid #e5e7eb"}),
+        html.H4("📝 Kết luận lâm sàng & Khuyến nghị:", style={"marginTop": "20px"}),
+        
+        dcc.Textarea(
+            id='clinical-conclusion-text',
+            value=saved_conclusion,
+            placeholder='Nhập chẩn đoán sơ bộ, nhận xét tín hiệu hoặc khuyến nghị điều trị tại đây...',
+            style={'width': '100%', 'height': '150px', 'padding': '10px', 'borderRadius': '5px', 'border': '1px solid #ccc', 'fontFamily': 'Arial'}
+        ),
+        html.Div([
+            html.Button("Lưu kết luận", id="btn-save-conclusion", style={"marginTop": "10px", "padding": "8px 20px", "background": "#059669", "color": "white", "border": "none", "borderRadius": "4px", "fontWeight": "bold"}),
+            html.Span(id="conclusion-msg", style={"marginLeft": "15px", "color": "green", "fontWeight": "bold"})
+        ]),
+        
         dcc.Store(id="temp-stats-store")
     ])
 
@@ -391,6 +427,7 @@ def display_page(path):
 )
 def update_table(contents, search, filenames):
     ctx = callback_context
+    errors = []
     if ctx.triggered and "upload-data" in ctx.triggered[0]['prop_id'] and contents:
         save_dir = get_base_path() / "data_raw" / "imported"
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -411,7 +448,11 @@ def update_table(contents, search, filenames):
                 with open(f_path, "w", encoding="utf-16") as f: f.write(text)
                 
                 add_recording(p_id, p_info.get('visit_date'), p_info.get('test_name'), str(f_path))
-            except Exception as e: print(e)
+                success_count += 1
+            except ValueError as ve:
+                errors.append(html.P(f"❌ {name}: {str(ve)}", style={'color': 'red'}))
+            except Exception as e:
+                errors.append(html.P(f"❌ {name}: Lỗi xử lý ({str(e)})", style={'color': 'red'}))
             
     # Handle Search & Refresh
     all_recs = get_all_recordings()
@@ -480,7 +521,6 @@ def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_
     msg = ""
     updated_fig = no_update
 
-    # CASE A: Bấm nút LƯU
     if "btn-save-label" in trigger_id and fig and "layout" in fig:
         shapes = fig["layout"].get("shapes", [])
 
@@ -572,6 +612,77 @@ def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_
         table = html.Table([header] + rows, style={"width": "100%", "borderCollapse": "collapse", "border": "1px solid #ddd"})
 
     return msg, table, updated_fig
+
+@app.callback(
+    Output("btn-delete-rec", "style"),
+    Input("table-recordings", "selected_rows")
+)
+def toggle_delete_button(selected_rows):
+    base_style = {"marginLeft": "10px", "padding": "8px 15px", "background": "#ef4444", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"}
+    if selected_rows:
+        base_style["display"] = "block"
+    else:
+        base_style["display"] = "none"
+    return base_style
+
+@app.callback(
+    Output("confirm-delete-dialog", "displayed"),
+    Output("confirm-delete-dialog", "message"),
+    Input("btn-delete-rec", "n_clicks"),
+    State("table-recordings", "selected_rows"),
+    State("table-recordings", "data"),
+    prevent_initial_call=True
+)
+def confirm_delete(n_clicks, selected_indices, rows):
+    if not n_clicks or not selected_indices:
+        return False, ""
+    
+    selected_index = selected_indices[0]
+    row_data = rows[selected_index]
+    msg = f"CẢNH BÁO: Bạn sắp xóa bản ghi của {row_data['patient']}.\nToàn bộ nhãn và dữ liệu liên quan sẽ bị xóa vĩnh viễn.\nBạn có chắc không?"
+    return True, msg
+
+@app.callback(
+    Output("table-recordings", "data", allow_duplicate=True),
+    Output("table-recordings", "selected_rows"),
+    Input("confirm-delete-dialog", "submit_n_clicks"),
+    State("table-recordings", "selected_rows"),
+    State("table-recordings", "data"),
+    prevent_initial_call=True
+)
+def execute_delete(submit_n, selected_indices, rows):
+    if not submit_n or not selected_indices:
+        return no_update, no_update
+    
+    selected_index = selected_indices[0]
+    rec_id = rows[selected_index]['id']
+    
+    file_path = delete_recording(rec_id)
+    
+    if file_path:
+        try:
+            path_obj = Path(file_path)
+            if path_obj.exists():
+                os.remove(path_obj)
+        except Exception as e:
+            print(f"Không thể xóa file vật lý: {e}")
+
+    new_recs = get_all_recordings()
+    new_rows = [{"id": r["id"], "date": r["visit_date"], "patient": f"{r['full_name']} ({r['patient_code']})", "test": r["test_name"], "action": f"[Xem chi tiết](/analysis/{r['id']})"} for r in new_recs]
+    
+    return new_rows, []
+
+@app.callback(
+    Output("conclusion-msg", "children"),
+    Input("btn-save-conclusion", "n_clicks"),
+    State("current-rec-id", "data"),
+    State("clinical-conclusion-text", "value"),
+    prevent_initial_call=True
+)
+def save_conclusion(n_clicks, rec_id, text):
+    if not rec_id: return no_update
+    update_recording_conclusion(rec_id, text)
+    return "✅ Đã lưu kết luận vào hồ sơ!"
 
 if __name__ == "__main__":
     app.run(debug=False, port=8051)

@@ -57,6 +57,9 @@ def collect_sweeps(all_lines):
 
 
 def parse_natus_content(content_str: str):
+    if "Patient ID" not in content_str and "Sampling Frequency" not in content_str:
+        raise ValueError("Nội dung file không hợp lệ ! Hãy Upload file có nội dung liên quan.")
+
     lines = [line.strip() for line in content_str.splitlines() if line.strip()]
     text = "\n".join(lines)
 
