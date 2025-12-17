@@ -184,3 +184,10 @@ def add_label_def(code, name, color="#6b7280"):
         return False, "Mã nhãn đã tồn tại!"
     finally:
         conn.close()
+
+def delete_all_labels_by_recording(rec_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM labels WHERE recording_id = ?", (rec_id,))
+    conn.commit()
+    conn.close()

@@ -16,7 +16,8 @@ from src.database.db_manager import (
     save_label_to_db, get_labels_by_recording, 
     delete_label_by_id, add_patient_if_not_exists, 
     add_recording, init_db,
-    get_all_label_defs, add_label_def
+    get_all_label_defs, add_label_def,
+    delete_all_labels_by_recording,
 )
 from src.processing.loader import get_data_slice, get_downsampled_data, parse_natus_content
 from src.processing.stats import calculate_clinical_stats
@@ -87,6 +88,37 @@ def layout_home():
     ])
 
 # --- TRANG PHÂN TÍCH ---
+def create_labels_table_component(rec_id):
+    labels = get_labels_by_recording(rec_id)
+    
+    if not labels:
+        return html.P("Chưa có nhãn nào.", style={"color": "gray", "fontStyle": "italic", "marginTop": "10px"})
+    
+    all_defs = {d['code']: d for d in get_all_label_defs()}
+    
+    header = html.Tr([
+        html.Th("Trace", style={"textAlign": "left"}), 
+        html.Th("Start", style={"textAlign": "right"}), 
+        html.Th("End", style={"textAlign": "right"}), 
+        html.Th("Loại", style={"textAlign": "center"}), 
+        html.Th("P2P (µV)", style={"textAlign": "right"}), 
+        html.Th("Xóa", style={"textAlign": "center"})
+    ])
+    
+    rows = []
+    for l in labels:
+        lbl_def = all_defs.get(l['label_type'], {"name": l['label_type'], "color": "black"})
+        rows.append(html.Tr([
+            html.Td(l['trace_id']),
+            html.Td(f"{l['start_ms']:.1f}", style={"textAlign": "right"}),
+            html.Td(f"{l['end_ms']:.1f}", style={"textAlign": "right"}),
+            html.Td(lbl_def['name'], style={"color": lbl_def['color'], "fontWeight": "bold", "textAlign": "center"}),
+            html.Td(f"{l['p2p_uv']}", style={"textAlign": "right"}),
+            html.Td(html.Button("❌", id={'type': 'del-btn', 'index': l['id']}, style={"border":"none", "background":"transparent", "cursor":"pointer"}), style={"textAlign": "center"})
+        ]))
+    
+    return html.Table([header] + rows, style={"width": "100%", "borderCollapse": "collapse", "border": "1px solid #ddd", "marginTop": "10px"})
+
 def layout_analysis(rec_id):
     rec = get_recording_by_id(rec_id)
     if not rec: return html.Div("❌ Không tìm thấy bản ghi.", style={"color": "red"})
@@ -197,8 +229,13 @@ def layout_analysis(rec_id):
         ], style={"display": "none", "position": "fixed", "top": 0, "left": 0, "width": "100%", "height": "100%", "backgroundColor": "rgba(0,0,0,0.5)", "justifyContent": "center", "alignItems": "center", "zIndex": 1000}),
 
         # 4. LABELS TABLE
-        html.H4("Danh sách vùng đã gán nhãn:", style={"marginTop": "20px"}),
-        html.Div(id="labels-table-container"),
+        html.Div([
+            html.H4("Danh sách vùng đã gán nhãn:", style={"margin": 0, "flex": 1}),
+            html.Button("🗑️ Xóa tất cả nhãn", id="btn-clear-all-labels", 
+                        style={"background": "#ef4444", "color": "white", "border": "none", "padding": "5px 10px", "borderRadius": "4px", "cursor": "pointer"})
+        ], style={"display": "flex", "alignItems": "center", "marginTop": "20px", "marginBottom": "10px"}),
+
+        html.Div(id="labels-table-container", children=create_labels_table_component(rec_id)),
 
         dcc.Store(id="temp-stats-store")
     ])
@@ -422,9 +459,12 @@ def handle_modal(n_open, n_cancel, n_confirm, code, name, current_options):
     Output("save-msg", "children"),
     Output("labels-table-container", "children"),
     Output("analysis-graph", "figure", allow_duplicate=True),
+
     Input("btn-save-label", "n_clicks"),
     Input("current-rec-id", "data"),
     Input({'type': 'del-btn', 'index': ALL}, 'n_clicks'),
+    Input("btn-clear-all-labels", "n_clicks"),
+
     State("analysis-graph", "figure"),
     State("label-type-dd", "value"),
     State("current-file-path", "data"),
@@ -432,7 +472,7 @@ def handle_modal(n_open, n_cancel, n_confirm, code, name, current_options):
     State("dsp-filters-checklist", "value"),
     prevent_initial_call=True
 )
-def batch_save_and_manage(n_save, rec_id, n_del, fig, label_type, file_path, boundaries, active_filters):
+def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_path, boundaries, active_filters):
     ctx = callback_context
     if not ctx.triggered: return no_update, no_update, no_update
     trigger_id = ctx.triggered[0]['prop_id']
@@ -490,10 +530,17 @@ def batch_save_and_manage(n_save, rec_id, n_del, fig, label_type, file_path, bou
 
     if "del-btn" in trigger_id:
         import json
-        btn_dict = json.loads(trigger_id.split('.')[0])
-        delete_label_by_id(btn_dict['index'])
-        msg = "Đã xóa nhãn."
+        try:
+            btn_dict = json.loads(trigger_id.split('.')[0])
+            delete_label_by_id(btn_dict['index'])
+            msg = "Đã xóa nhãn."
+        except Exception as e:
+            print(f"Lỗi xóa nhãn: {e}")
 
+    if "btn-clear-all-labels" in trigger_id:
+        delete_all_labels_by_recording(rec_id)
+        msg = "🧹 Đã xóa sạch danh sách nhãn."
+        
     labels = get_labels_by_recording(rec_id)
     if not labels:
         table = html.P("Chưa có nhãn nào.", style={"color": "gray"})
