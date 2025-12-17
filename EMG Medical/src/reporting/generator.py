@@ -1,4 +1,3 @@
-# File: src/reporting/generator.py
 import io
 import base64
 import plotly.graph_objects as go
@@ -6,28 +5,23 @@ from xhtml2pdf import pisa
 from datetime import datetime
 
 def create_snapshot_base64(time_arr, volt_arr, title="Snapshot"):
-    """
-    Vẽ lại đoạn sóng thành ảnh tĩnh (PNG) và trả về chuỗi Base64 để nhúng vào HTML.
-    """
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=time_arr, y=volt_arr, 
         mode='lines', 
-        line=dict(color='#dc2626', width=1.5) # Màu đỏ cho vùng bệnh lý
+        line=dict(color='#dc2626', width=1.5)
     ))
     
-    # Tối giản hóa đồ thị để in báo cáo cho đẹp
     fig.update_layout(
         title=dict(text=title, font=dict(size=12)),
         margin=dict(l=40, r=20, t=30, b=30),
         xaxis=dict(title="Time (ms)", showgrid=True, gridcolor='#f3f4f6'),
         yaxis=dict(title="µV", showgrid=True, gridcolor='#f3f4f6'),
         template="plotly_white",
-        width=600, height=200 # Kích thước ảnh
+        width=600, height=200
     )
     
-    # Xuất ảnh ra bytes (Sử dụng Kaleido engine)
-    img_bytes = fig.to_image(format="png", scale=2) # Scale=2 để ảnh nét hơn khi in
+    img_bytes = fig.to_image(format="png", scale=2)
     return base64.b64encode(img_bytes).decode('utf-8')
 
 def generate_pdf_buffer(patient_info, rec_info, labels_data):
@@ -38,7 +32,7 @@ def generate_pdf_buffer(patient_info, rec_info, labels_data):
     - labels_data: list các dict chứa {stats, time_arr, volt_arr, label_type...}
     """
     
-    # 1. Tạo HTML Template (CSS + Nội dung)
+    # 1. HTML Template
     html_content = f"""
     <html>
     <head>
@@ -83,7 +77,6 @@ def generate_pdf_buffer(patient_info, rec_info, labels_data):
         html_content += "<p><em>Không có vùng bất thường nào được ghi nhận.</em></p>"
     else:
         for i, lbl in enumerate(labels_data, 1):
-            # Tạo ảnh snapshot
             img_b64 = create_snapshot_base64(
                 lbl['time_arr'], lbl['volt_arr'], 
                 title=f"Vùng #{i}: {lbl['trace_id']} ({lbl['start_ms']:.1f}ms - {lbl['end_ms']:.1f}ms)"
