@@ -24,7 +24,7 @@ from src.database.db_manager import (
     update_recording_conclusion,
     update_recording_metadata
 )
-from src.processing.loader import get_data_slice, get_downsampled_data, parse_natus_content, validate_natus_structure
+from src.processing.loader import get_data_slice, get_downsampled_data, validate_natus_structure, load_data_from_file, validate_csv_buffer
 from src.processing.stats import calculate_clinical_stats
 from src.processing.filters import apply_notch_filter, apply_bandpass_filter
 from src.reporting.generator import generate_pdf_buffer
@@ -457,6 +457,7 @@ def display_page(path):
     prevent_initial_call=True
 )
 def update_table(contents, search, submit_delete, filenames):
+    # --- XỬ LÝ UPLOAD ---
     ctx = callback_context
     if ctx.triggered and "upload-data" in ctx.triggered[0]['prop_id'] and contents:
         save_dir = get_base_path() / "data_raw" / "imported"
@@ -472,65 +473,77 @@ def update_table(contents, search, submit_delete, filenames):
                 content_type, content_string = content.split(',')
                 decoded = base64.b64decode(content_string)
                 
-                text_content = ""
-                try:
-                    text_content = decoded.decode('utf-16')
-                except UnicodeDecodeError:
+                is_valid = False
+                file_ext = Path(name).suffix.lower()
+
+                if file_ext == '.csv':
+                    if validate_csv_buffer(decoded):
+                        is_valid = True
+                    else:
+                        errors.append(f"⚠️ {name}: CSV không chứa dữ liệu số hợp lệ.")
+                
+                elif file_ext == '.txt':
                     try:
-                        text_content = decoded.decode('utf-8')
+                        text_content = decoded.decode('utf-16')
                     except:
-                        errors.append(f"❌ {name}: Không đọc được file !")
-                        continue
+                        try: text_content = decoded.decode('utf-8')
+                        except: text_content = ""
+                    
+                    if validate_natus_structure(text_content):
+                        is_valid = True
+                    else:
+                        errors.append(f"⚠️ {name}: Không phải định dạng EMG Natus.")
+                
+                else:
+                    errors.append(f"❌ {name}: Định dạng {file_ext} chưa được hỗ trợ.")
 
-                # Gọi hàm kiểm tra cấu trúc
-                if not validate_natus_structure(text_content):
-                    errors.append(f"⚠️ {name}: Nội dung không hợp lệ . Đã bỏ qua.")
-                    continue
+                if not is_valid: continue
 
+                # --- LƯU TRỮ (MD5) ---
                 file_hash = hashlib.md5(decoded).hexdigest()
-                
-                original_ext = Path(name).suffix
-                safe_name = f"{file_hash}{original_ext}" 
+                safe_name = f"{file_hash}{file_ext}" 
                 f_path = save_dir / safe_name
-                
-                is_file_saved = False
                 
                 if not f_path.exists():
                     with open(f_path, "wb") as f:
                         f.write(decoded)
-                    is_file_saved = True
                     count_new_file += 1
                 else:
                     count_reused += 1
 
-                data = parse_natus_content(text_content)
-                p_info = data.get('patient_info', {})
-                
-                p_id = add_patient_if_not_exists(
-                    p_info.get('patient_id', 'UNK'), 
-                    p_info.get('first_name', 'Unknown')
-                )
-                
-                add_recording(
-                    p_id, 
-                    p_info.get('visit_date', 'N/A'), 
-                    p_info.get('test_name', 'Imported'), 
-                    str(f_path)
-                )
-                
-                count_success += 1
-                
+                # --- IMPORT DB ---
+                result = load_data_from_file(f_path)
+                if result:
+                    p_info = result['patient_info']
+                    metadata = result.get('metadata', {})
+                    
+                    p_id = add_patient_if_not_exists(
+                        p_info.get('patient_id', 'UNK'), 
+                        p_info.get('full_name', 'Unknown')
+                    )
+                    
+                    add_recording(
+                        p_id, 
+                        p_info.get('visit_date', 'N/A'), 
+                        p_info.get('test_name', 'Imported'), 
+                        str(f_path),
+                        metadata=metadata
+                    )
+                    count_success += 1
+                else:
+                    errors.append(f"❌ {name}: Lỗi khi đọc dữ liệu.")
+
             except Exception as e:
-                print(f"Lỗi import {name}: {e}")
+                print(f"Lỗi {name}: {e}")
                 errors.append(f"❌ {name}: Lỗi hệ thống ({str(e)})")
         
+        # --- THÔNG BÁO ---
         status_parts = []
         if count_success > 0:
             msg = f"✅ Đã xử lý {count_success} bản ghi "
             detail = []
             if count_new_file > 0: detail.append(f"Lưu mới: {count_new_file}")
             if count_reused > 0: detail.append(f"Dùng lại file cũ: {count_reused}")
-            
             msg += f"({', '.join(detail)})"
             status_parts.append(html.Span(msg, style={'color': 'green', 'fontWeight': 'bold'}))
         

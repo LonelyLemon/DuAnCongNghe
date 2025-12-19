@@ -1,4 +1,5 @@
 import sqlite3
+import json
 from pathlib import Path
 from src.utils import get_base_path
 
@@ -75,6 +76,12 @@ def init_db():
             ("ARTIFACT", "Nhiễu (Artifact)", "#eab308")
         ])
 
+    try:
+        cursor.execute("ALTER TABLE recordings ADD COLUMN metadata TEXT")
+        print("--- [DB] Đã thêm cột 'metadata' ---")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -93,30 +100,37 @@ def add_patient_if_not_exists(patient_code, full_name, gender=None):
     conn.close()
     return p_id
 
-def add_recording(patient_id, visit_date, test_name, file_path, duration_ms=0):
+def add_recording(patient_id, visit_date, test_name, file_path, metadata=None):
     conn = get_connection()
     cur = conn.cursor()
     
+    cur.execute("SELECT id FROM recordings WHERE file_path = ?", (file_path,))
+    res = cur.fetchone()
+    if res:
+        conn.close()
+        return res['id']
+
+    meta_json = json.dumps(metadata) if metadata else "{}"
+
     cur.execute('''
-        SELECT id FROM recordings 
-        WHERE patient_id = ? AND visit_date = ? AND test_name = ?
-    ''', (patient_id, visit_date, test_name))
+        INSERT INTO recordings (patient_id, visit_date, test_name, file_path, created_at, metadata)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+    ''', (patient_id, visit_date, test_name, file_path, meta_json))
     
-    row = cur.fetchone()
-    
-    if row:
-        rec_id = row['id']
-        cur.execute("UPDATE recordings SET file_path = ? WHERE id = ?", (str(file_path), rec_id))
-    else:
-        cur.execute('''
-            INSERT INTO recordings (patient_id, visit_date, test_name, file_path, duration_ms)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (patient_id, visit_date, test_name, str(file_path), duration_ms))
-        rec_id = cur.lastrowid
-    
+    rec_id = cur.lastrowid
     conn.commit()
     conn.close()
     return rec_id
+
+def get_recording_metadata(rec_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT metadata FROM recordings WHERE id = ?", (rec_id,))
+    row = cur.fetchone()
+    conn.close()
+    if row and row['metadata']:
+        return json.loads(row['metadata'])
+    return {}
 
 def get_all_recordings():
     conn = get_connection()
