@@ -4,7 +4,6 @@ import base64
 import io
 from pathlib import Path
 
-
 SWEEP_HDR_RE = re.compile(r"Sweep\s+Data\(mV\)<(\d+)>=")
 LONGTRACE_HDR_RE = re.compile(r"LongTrace\s+Data\(mV\)<(\d+)>=")
 
@@ -55,7 +54,6 @@ def collect_sweeps(all_lines):
         i += 1
     return sweeps
 
-
 def parse_natus_content(content_str: str):
     if "Patient ID" not in content_str and "Sampling Frequency" not in content_str:
         raise ValueError("Nội dung file không hợp lệ ! Hãy Upload file có nội dung liên quan.")
@@ -63,15 +61,16 @@ def parse_natus_content(content_str: str):
     lines = [line.strip() for line in content_str.splitlines() if line.strip()]
     text = "\n".join(lines)
 
-    # 1. Metadata
+    # 1. Metadata Bệnh nhân
     patient_info = {
         "patient_id": _extract_value(text, "Patient ID"),
         "first_name": _extract_value(text, "First Name"),
         "visit_date": _extract_value(text, "Visit Date"),
         "test_name": _extract_value(text, "Full Name"),
+        "gender": _extract_value(text, "Gender"),
     }
     
-    # 2. Device Info & Time
+    # 2. Technical Metadata
     subsampled_khz = _find_numeric_value(text, "Subsampled", "kHz")
     if not subsampled_khz:
         samp_freq = _find_numeric_value(text, "Sampling Frequency", "kHz")
@@ -79,6 +78,21 @@ def parse_natus_content(content_str: str):
         
     dt_ms = 1_000.0 / (subsampled_khz * 1000.0)
     sweep_dur = _find_numeric_value(text, "Sweep Duration", "ms") or 100.0
+
+    tech_info = {
+        "sampling_rate": f"{_find_numeric_value(text, 'Sampling Frequency', 'kHz')} kHz",
+        "subsampled_rate": f"{subsampled_khz} kHz",
+        "sweep_duration": f"{sweep_dur} ms",
+        "low_filter": _extract_value(text, "Low(Hz)"),
+        "high_filter": _extract_value(text, "High(kHz)"),
+        "notch_filter": _extract_value(text, "Notch Filter(Hz)"),
+        "amp_range": _extract_value(text, "Amplifier Range(mV)"),
+        "active_input": _extract_value(text, "Active Input"),
+        "ref_input": _extract_value(text, "Reference Input"),
+        "run_type": _extract_value(text, "Run Type"),
+        "stim_side": _extract_value(text, "Stim Side"),
+        "recording_site": _extract_value(text, "Master Anatomy")
+    }
 
     # 3. Extract Sweeps
     sweeps_raw = collect_sweeps(lines)
@@ -90,11 +104,7 @@ def parse_natus_content(content_str: str):
     for idx, (raw_chunk, n_declared) in enumerate(sweeps_raw, 1):
         mv_values = np.array(parse_number_list(raw_chunk), dtype=float)
         
-        if n_declared and n_declared != len(mv_values):
-            pass 
-
         uv_values = mv_values * 1000.0
-        
         real_duration = len(uv_values) * dt_ms
         
         full_voltage_list.extend(uv_values)
@@ -110,6 +120,7 @@ def parse_natus_content(content_str: str):
 
     return {
         "patient_info": patient_info,
+        "tech_info": tech_info,
         "full_sequence": {
             "dt_ms": dt_ms,
             "boundaries": boundaries
@@ -125,7 +136,6 @@ def load_natus_txt(file_path: Path):
     except Exception as e:
         print(f"Error reading file {file_path}: {e}")
         return {}
-
 
 def get_data_slice(file_path, start_ms, end_ms):
     data = load_natus_txt(file_path)
@@ -147,8 +157,9 @@ def get_downsampled_data(file_path, max_points=5000):
     full_stream = data.get("full_data_stream", [])
     dt_ms = data.get("full_sequence", {}).get("dt_ms", 0.02)
     boundaries = data.get("full_sequence", {}).get("boundaries", [])
+    tech_info = data.get("tech_info", {})
     
-    if not full_stream: return np.array([]), np.array([]), []
+    if not full_stream: return np.array([]), np.array([]), [], {}
 
     full_vals = np.array(full_stream, dtype=float)
     
@@ -156,16 +167,13 @@ def get_downsampled_data(file_path, max_points=5000):
     ds_vals = full_vals[::step]
     ds_times = np.arange(len(ds_vals), dtype=float) * dt_ms * step
     
-    return ds_times, ds_vals, boundaries
+    return ds_times, ds_vals, boundaries, tech_info
 
 def validate_natus_structure(content_str: str) -> bool:
     if not content_str:
         return False
-    
     required_keywords = ["Patient ID", "Sweep Data", "EMG", "EEG", "ECG", "Sampling Frequency", "Sampling Rate", "Channel Labels"]
-    
     for keyword in required_keywords:
         if keyword in content_str:
             return True
-            
     return False

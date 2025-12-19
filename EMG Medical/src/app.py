@@ -43,7 +43,7 @@ app.layout = html.Div([
         html.H2("EMG LAB PRO", style={"margin": 0, "color": "white"}),
         html.Div([
             dcc.Link("Trang chủ", href="/", style={"color": "white", "marginRight": "20px", "textDecoration": "none", "fontWeight": "bold"}),
-            html.Span("v2.0 (Stable)", style={"color": "#9ca3af", "fontSize": "14px"})
+            html.Span("v2.1 (TechView)", style={"color": "#9ca3af", "fontSize": "14px"})
         ], style={"display": "flex", "alignItems": "center"})
     ], style={"backgroundColor": "#111827", "padding": "15px 30px", "display": "flex", "justifyContent": "space-between", "alignItems": "center"}),
     html.Div(id="page-content", style={"padding": "20px", "maxWidth": "1600px", "margin": "0 auto"})
@@ -178,7 +178,7 @@ def layout_analysis(rec_id):
         if fallback.exists(): file_path = fallback
         else: return html.Div(f"❌ File gốc không tồn tại: {file_path}", style={"color": "red"})
 
-    ds_time, ds_volt, boundaries = get_downsampled_data(file_path, max_points=5000)
+    ds_time, ds_volt, boundaries, tech_info = get_downsampled_data(file_path, max_points=5000)
     
     total_dur = boundaries[-1]["end_ms"] if boundaries else 0
     num_traces = len(boundaries)
@@ -187,15 +187,45 @@ def layout_analysis(rec_id):
 
     label_defs = get_all_label_defs()
     dropdown_options = [{"label": l["name"], "value": l["code"]} for l in label_defs]
-
     saved_conclusion = rec.get("clinical_conclusion", "") or ""
+
+    tech_table_rows = []
+    tech_labels_map = {
+        "sampling_rate": "Tần số lấy mẫu (ADC)", "subsampled_rate": "Tần số hiển thị",
+        "sweep_duration": "Thời lượng quét (Sweep)", "low_filter": "Lọc thông cao (Low Cut)",
+        "high_filter": "Lọc thông thấp (High Cut)", "notch_filter": "Lọc nhiễu nguồn (Notch)",
+        "amp_range": "Dải biên độ (Range)", "active_input": "Đầu vào Active",
+        "ref_input": "Đầu vào Reference", "run_type": "Chế độ đo",
+        "stim_side": "Bên kích thích", "recording_site": "Vị trí ghi"
+    }
+    for key, val in tech_info.items():
+        if val:
+            display_name = tech_labels_map.get(key, key)
+            tech_table_rows.append(html.Tr([
+                html.Td(display_name, style={"fontWeight": "bold", "padding": "8px", "borderBottom": "1px solid #eee", "width": "50%"}),
+                html.Td(str(val), style={"padding": "8px", "borderBottom": "1px solid #eee", "color": "#2563eb"})
+            ]))
 
     return html.Div([
         dcc.Store(id="current-rec-id", data=rec_id),
         dcc.Store(id="current-file-path", data=str(file_path)),
-        dcc.Store(id="current-boundaries", data=boundaries), 
+        dcc.Store(id="current-boundaries", data=boundaries),
         dcc.Store(id="current-dt-ms", data=dt_ms),
         
+        # Update: Hiển thị thông số kỹ thuật
+        html.Div(id="modal-tech-info", children=[
+            html.Div([
+                html.Div([
+                    html.H3("🛠️ Thông số kỹ thuật chi tiết", style={"margin": 0, "flex": 1}),
+                    html.Button("X", id="btn-close-tech", style={"background": "transparent", "border": "none", "fontSize": "20px", "cursor": "pointer"})
+                ], style={"display": "flex", "alignItems": "center", "borderBottom": "1px solid #eee", "paddingBottom": "10px", "marginBottom": "15px"}),
+                html.Table(tech_table_rows, style={"width": "100%", "borderCollapse": "collapse", "fontSize": "14px"}),
+                html.Div(style={"textAlign": "right", "marginTop": "20px"}, children=[
+                    html.Button("Đóng", id="btn-close-tech-btm", style={"padding": "8px 20px", "background": "#4b5563", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"})
+                ])
+            ], style={"backgroundColor": "white", "padding": "25px", "borderRadius": "8px", "width": "500px", "boxShadow": "0 10px 25px rgba(0,0,0,0.2)", "maxHeight": "80vh", "overflowY": "auto"})
+        ], style={"display": "none", "position": "fixed", "top": 0, "left": 0, "width": "100%", "height": "100%", "backgroundColor": "rgba(0,0,0,0.6)", "justifyContent": "center", "alignItems": "center", "zIndex": 2000}),
+
         # 1. INFO PANEL
         html.Div([
             html.Div([
@@ -208,6 +238,8 @@ def layout_analysis(rec_id):
                 html.P(f"Tần số mẫu: ~{int(fs_hz)} Hz", style={"margin": 0}),
                 html.P(f"Tổng thời gian: {total_dur/1000:.1f} s", style={"margin": 0}),
                 html.P(f"Số đoạn (Traces): {num_traces}", style={"margin": 0}),
+                html.Button("ℹ️ Thông số kỹ thuật", id="btn-show-tech", 
+                            style={"marginTop": "5px", "padding": "5px 10px", "background": "#3b82f6", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer", "fontSize": "12px"})
             ], style={"flex": 0.5, "borderLeft": "1px solid #ccc", "paddingLeft": "15px", "fontSize": "13px", "color": "#4b5563"}),
 
             # FILTER CONTROLS
@@ -846,6 +878,24 @@ def manage_edit_modal(n_edit, n_save, n_cancel, selected_indices, rows,
         return hide_style, no_update, no_update, "", "", "", ""
 
     return hide_style, no_update, no_update, no_update, no_update, no_update, no_update
+
+@app.callback(
+    Output("modal-tech-info", "style"),
+    Input("btn-show-tech", "n_clicks"),
+    Input("btn-close-tech", "n_clicks"),
+    Input("btn-close-tech-btm", "n_clicks"),
+    prevent_initial_call=True
+)
+def toggle_tech_modal(n_open, n_close, n_close_btm):
+    ctx = callback_context
+    if not ctx.triggered: return no_update
+    
+    trigger_id = ctx.triggered[0]['prop_id']
+    
+    if "btn-show-tech" in trigger_id:
+        return {"display": "flex", "position": "fixed", "top": 0, "left": 0, "width": "100%", "height": "100%", "backgroundColor": "rgba(0,0,0,0.6)", "justifyContent": "center", "alignItems": "center", "zIndex": 2000}
+    
+    return {"display": "none"}
 
 if __name__ == "__main__":
     app.run(debug=False, port=8051)
