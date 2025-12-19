@@ -39,6 +39,8 @@ app.title = "EMG Lab - Pro"
 # Layout Container
 app.layout = html.Div([
     dcc.Location(id="url", refresh=False),
+    dcc.Store(id="global-toast-store", data={}),
+    html.Div(id="global-toast-container", style={"position": "fixed", "top": "20px", "right": "20px", "zIndex": 9999}),
     html.Div([
         html.H2("EMG LAB PRO", style={"margin": 0, "color": "white"}),
         html.Div([
@@ -48,6 +50,43 @@ app.layout = html.Div([
     ], style={"backgroundColor": "#111827", "padding": "15px 30px", "display": "flex", "justifyContent": "space-between", "alignItems": "center"}),
     html.Div(id="page-content", style={"padding": "20px", "maxWidth": "1600px", "margin": "0 auto"})
 ])
+
+app.clientside_callback(
+    """
+    function(data) {
+        if (!data || !data.msg) return window.dash_clientside.no_update;
+        
+        const container = document.getElementById("global-toast-container");
+        const toast = document.createElement("div");
+        
+        // Style thông báo
+        toast.innerText = data.msg;
+        toast.style.padding = "15px 25px";
+        toast.style.marginBottom = "10px";
+        toast.style.borderRadius = "5px";
+        toast.style.color = "white";
+        toast.style.fontWeight = "bold";
+        toast.style.boxShadow = "0 4px 6px rgba(0,0,0,0.1)";
+        toast.style.opacity = "0";
+        toast.style.transition = "opacity 0.5s ease-in-out";
+        toast.style.backgroundColor = data.type === "error" ? "#ef4444" : "#059669";
+
+        container.appendChild(toast);
+
+        // Fade In
+        setTimeout(() => { toast.style.opacity = "1"; }, 50);
+
+        setTimeout(() => {
+            toast.style.opacity = "0";
+            setTimeout(() => { toast.remove(); }, 500);
+        }, 3000);
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("global-toast-container", "children"),
+    Input("global-toast-store", "data")
+)
 
 # --- TRANG CHỦ ---
 def layout_home():
@@ -619,7 +658,7 @@ def handle_modal(n_open, n_cancel, n_confirm, code, name, current_options):
 
 # Xử lý Lưu Nhãn & Xóa Nhãn
 @app.callback(
-    Output("save-msg", "children"),
+    Output("global-toast-store", "data", allow_duplicate=True),
     Output("labels-table-container", "children"),
     Output("analysis-graph", "figure", allow_duplicate=True),
 
@@ -637,10 +676,12 @@ def handle_modal(n_open, n_cancel, n_confirm, code, name, current_options):
 )
 def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_path, boundaries, active_filters):
     ctx = callback_context
-    if not ctx.triggered: return no_update, no_update, no_update
+    if not ctx.triggered: 
+        return no_update, no_update, no_update
     trigger_id = ctx.triggered[0]['prop_id']
     
     msg = ""
+    toast_data = no_update
     updated_fig = no_update
 
     if "btn-save-label" in trigger_id and fig and "layout" in fig:
@@ -679,7 +720,7 @@ def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_
                 count += 1
             
             if count > 0:
-                msg = f"Đã lưu thành công {count} vùng chọn!"
+                toast_data = {"msg": f"✅ Đã lưu thành công {count} vùng chọn!", "type": "success"}
             
                 import copy
                 updated_fig = copy.deepcopy(fig)
@@ -688,20 +729,20 @@ def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_
                     if s.get('type') != 'rect' or s.get('yref') == 'paper'
                 ]
             else:
-                msg = "Không tìm thấy vùng chọn hợp lệ"
+                toast_data = {"msg": "⚠️ Không tìm thấy vùng chọn hợp lệ!", "type": "error"}
 
     if "del-btn" in trigger_id:
         import json
         try:
             btn_dict = json.loads(trigger_id.split('.')[0])
             delete_label_by_id(btn_dict['index'])
-            msg = "Đã xóa nhãn."
+            toast_data = {"msg": "Đã xóa nhãn.", "type": "success"}
         except Exception as e:
             print(f"Lỗi xóa nhãn: {e}")
 
     if "btn-clear-all-labels" in trigger_id:
         delete_all_labels_by_recording(rec_id)
-        msg = "🧹 Đã xóa sạch danh sách nhãn."
+        toast_data = {"msg": "🧹 Đã xóa sạch danh sách nhãn.", "type": "success"}
         
     labels = get_labels_by_recording(rec_id)
     if not labels:
@@ -733,7 +774,7 @@ def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_
             ]))
         table = html.Table([header] + rows, style={"width": "100%", "borderCollapse": "collapse", "border": "1px solid #ddd"})
 
-    return msg, table, updated_fig
+    return toast_data, table, updated_fig
 
 @app.callback(
     Output("btn-delete-rec", "style"),
@@ -801,7 +842,7 @@ def execute_delete(submit_n, selected_indices, rows):
     return new_rows, []
 
 @app.callback(
-    Output("conclusion-msg", "children"),
+    Output("global-toast-store", "data", allow_duplicate=True),
     Input("btn-save-conclusion", "n_clicks"),
     State("current-rec-id", "data"),
     State("clinical-conclusion-text", "value"),
@@ -810,7 +851,7 @@ def execute_delete(submit_n, selected_indices, rows):
 def save_conclusion(n_clicks, rec_id, text):
     if not rec_id: return no_update
     update_recording_conclusion(rec_id, text)
-    return "✅ Đã lưu kết luận vào hồ sơ!"
+    return {"msg": "✅ Đã lưu kết luận vào hồ sơ!", "type": "success"}
 
 @app.callback(
     Output("modal-edit-rec", "style"),

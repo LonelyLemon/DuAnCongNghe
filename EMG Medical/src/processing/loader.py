@@ -157,6 +157,7 @@ def get_downsampled_data(file_path, max_points=5000):
     full_stream = data.get("full_data_stream", [])
     dt_ms = data.get("full_sequence", {}).get("dt_ms", 0.02)
     boundaries = data.get("full_sequence", {}).get("boundaries", [])
+
     tech_info = data.get("tech_info", {})
     
     if not full_stream: return np.array([]), np.array([]), [], {}
