@@ -7,11 +7,13 @@ requires-python = ">=3.13"
 dependencies = [
     "dash>=3.2.0",
     "dash-table>=5.0.0",
+    "google-generativeai>=0.8.6",
     "kaleido>=1.2.0",
     "matplotlib>=3.10.7",
     "numpy>=2.3.3",
     "pandas>=2.3.3",
     "plotly>=6.3.1",
+    "python-dotenv>=1.2.1",
     "scipy>=1.16.3",
     "xhtml2pdf>=0.2.17",
 ]

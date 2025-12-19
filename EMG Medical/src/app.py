@@ -28,7 +28,19 @@ from src.processing.loader import get_data_slice, get_downsampled_data, parse_na
 from src.processing.stats import calculate_clinical_stats
 from src.processing.filters import apply_notch_filter, apply_bandpass_filter
 from src.reporting.generator import generate_pdf_buffer
+from src.ai_assistant import ask_gemini_medical
 from src.utils import get_base_path
+
+# Chatbot Style
+CHAT_STYLE = {
+    "position": "fixed", "bottom": "80px", "right": "20px", "width": "350px", "height": "450px",
+    "backgroundColor": "white", "boxShadow": "0 4px 12px rgba(0,0,0,0.2)", "borderRadius": "10px",
+    "zIndex": 10000, "display": "flex", "flexDirection": "column", "overflow": "hidden",
+    "border": "1px solid #ddd"
+}
+CHAT_HEADER_STYLE = {"backgroundColor": "#2563eb", "color": "white", "padding": "10px", "fontWeight": "bold", "display": "flex", "justifyContent": "space-between"}
+CHAT_BODY_STYLE = {"flex": 1, "padding": "10px", "overflowY": "auto", "backgroundColor": "#f9fafb", "fontSize": "14px"}
+CHAT_INPUT_AREA_STYLE = {"padding": "10px", "borderTop": "1px solid #ddd", "display": "flex"}
 
 # --- CONFIG ---
 init_db()
@@ -40,7 +52,35 @@ app.title = "EMG Lab - Pro"
 app.layout = html.Div([
     dcc.Location(id="url", refresh=False),
     dcc.Store(id="global-toast-store", data={}),
+    dcc.Store(id="temp-stats-store", data={}),
     html.Div(id="global-toast-container", style={"position": "fixed", "top": "20px", "right": "20px", "zIndex": 9999}),
+
+    # --- CHATBOT UI ---
+    html.Button("💬", id="btn-toggle-chat", style={
+        "position": "fixed", "bottom": "20px", "right": "20px", "width": "50px", "height": "50px",
+        "borderRadius": "50%", "backgroundColor": "#2563eb", "color": "white", "fontSize": "24px",
+        "border": "none", "boxShadow": "0 4px 6px rgba(0,0,0,0.3)", "cursor": "pointer", "zIndex": 10001
+    }),
+
+    html.Div(id="chat-window", style=dict(CHAT_STYLE, display="none"), children=[
+        html.Div([
+            html.Span("Trợ lý EMG AI"),
+            html.Button("X", id="btn-close-chat", style={"background": "transparent", "border": "none", "color": "white", "cursor": "pointer"})
+        ], style=CHAT_HEADER_STYLE),
+        
+        html.Div(id="chat-history", children=[
+            html.Div("Xin chào! Tôi có thể giúp gì về phân tích tín hiệu?", style={"backgroundColor": "#e5e7eb", "padding": "8px", "borderRadius": "5px", "marginBottom": "5px", "maxWidth": "80%"})
+        ], style=CHAT_BODY_STYLE),
+        
+        dcc.Loading(
+            html.Div([
+                dcc.Input(id="chat-input", type="text", placeholder="Hỏi về tín hiệu...", style={"flex": 1, "padding": "8px", "border": "1px solid #ccc", "borderRadius": "4px"}),
+                html.Button("Gửi", id="btn-send-chat", style={"marginLeft": "5px", "padding": "5px 10px", "backgroundColor": "#2563eb", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"})
+            ], style=CHAT_INPUT_AREA_STYLE),
+            type="dot"
+        )
+    ]),
+
     html.Div([
         html.H2("EMG LAB PRO", style={"margin": 0, "color": "white"}),
         html.Div([
@@ -373,8 +413,6 @@ def layout_analysis(rec_id):
             html.Button("Lưu kết luận", id="btn-save-conclusion", style={"marginTop": "10px", "padding": "8px 20px", "background": "#059669", "color": "white", "border": "none", "borderRadius": "4px", "fontWeight": "bold"}),
             html.Span(id="conclusion-msg", style={"marginLeft": "15px", "color": "green", "fontWeight": "bold"})
         ]),
-        
-        dcc.Store(id="temp-stats-store")
     ])
 
 def create_initial_figure(time, voltage, bounds):
@@ -937,6 +975,68 @@ def toggle_tech_modal(n_open, n_close, n_close_btm):
         return {"display": "flex", "position": "fixed", "top": 0, "left": 0, "width": "100%", "height": "100%", "backgroundColor": "rgba(0,0,0,0.6)", "justifyContent": "center", "alignItems": "center", "zIndex": 2000}
     
     return {"display": "none"}
+
+@app.callback(
+    Output("chat-window", "style"),
+    Input("btn-toggle-chat", "n_clicks"),
+    Input("btn-close-chat", "n_clicks"),
+    State("chat-window", "style"),
+    prevent_initial_call=True
+)
+def toggle_chat_window(n_open, n_close, current_style):
+    ctx = callback_context
+    if not ctx.triggered: return no_update
+    trigger = ctx.triggered[0]['prop_id']
+    
+    new_style = current_style.copy()
+    if "btn-toggle-chat" in trigger:
+        if new_style.get("display") == "none":
+            new_style["display"] = "flex"
+        else:
+            new_style["display"] = "none"
+    elif "btn-close-chat" in trigger:
+        new_style["display"] = "none"
+        
+    return new_style
+
+@app.callback(
+    Output("chat-history", "children"),
+    Output("chat-input", "value"),
+    Input("btn-send-chat", "n_clicks"),
+    Input("chat-input", "n_submit"),
+    State("chat-input", "value"),
+    State("chat-history", "children"),
+    State("temp-stats-store", "data"),
+    prevent_initial_call=True
+)
+def process_chat_message(n_clicks, n_submit, user_text, current_history, stats_data):
+    if not user_text: return no_update, no_update
+
+    user_msg_div = html.Div(user_text, style={
+        "backgroundColor": "#dbeafe", "padding": "8px", "borderRadius": "5px", 
+        "marginBottom": "5px", "marginLeft": "auto", "maxWidth": "80%", "textAlign": "right"
+    })
+    current_history.append(user_msg_div)
+
+    context_info = None
+    if stats_data:
+        s = stats_data.get("stats", {})
+        context_info = f"""
+        - Dữ liệu vùng chọn: {stats_data.get('start'):.1f}ms đến {stats_data.get('end'):.1f}ms
+        - P2P (Biên độ đỉnh-đỉnh): {s.get('p2p_uv')} µV
+        - RMS (Hiệu dụng): {s.get('rms_uv')} µV
+        - Diện tích (Area): {s.get('area_uvms')} µV.ms
+        """
+    
+    ai_response_text = ask_gemini_medical(user_text, context_info)
+
+    ai_msg_div = html.Div(dcc.Markdown(ai_response_text), style={
+        "backgroundColor": "#f3f4f6", "padding": "8px", "borderRadius": "5px", 
+        "marginBottom": "5px", "maxWidth": "90%", "textAlign": "left"
+    })
+    current_history.append(ai_msg_div)
+
+    return current_history, ""
 
 if __name__ == "__main__":
     app.run(debug=False, port=8051)
