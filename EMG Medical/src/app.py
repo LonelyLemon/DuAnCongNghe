@@ -1,5 +1,6 @@
 import sys
 import os
+import hashlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,8 +22,9 @@ from src.database.db_manager import (
     delete_all_labels_by_recording,
     delete_recording,
     update_recording_conclusion,
+    update_recording_metadata
 )
-from src.processing.loader import get_data_slice, get_downsampled_data, parse_natus_content
+from src.processing.loader import get_data_slice, get_downsampled_data, parse_natus_content, validate_natus_structure
 from src.processing.stats import calculate_clinical_stats
 from src.processing.filters import apply_notch_filter, apply_bandpass_filter
 from src.reporting.generator import generate_pdf_buffer
@@ -50,6 +52,7 @@ app.layout = html.Div([
 # --- TRANG CHỦ ---
 def layout_home():
     recordings = get_all_recordings()
+
     table_data = []
     for r in recordings:
         table_data.append({
@@ -72,10 +75,14 @@ def layout_home():
         ]),
         
         html.H3("Danh sách bản ghi", style={"marginTop": "20px"}),
+
         html.Div([
             dcc.Input(id="search-input", type="text", placeholder="🔍 Tìm bệnh nhân...", 
                       style={"padding": "8px", "width": "300px", "border": "1px solid #ccc", "borderRadius": "4px"}),
             
+            html.Button("✏️ Sửa thông tin", id="btn-edit-rec", 
+                        style={"marginLeft": "10px", "padding": "8px 15px", "background": "#f59e0b", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer", "display": "none"}),
+
             html.Button("🗑️ Xóa bản ghi đã chọn", id="btn-delete-rec", 
                         style={"marginLeft": "10px", "padding": "8px 15px", "background": "#ef4444", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer", "display": "none"}, # Mặc định ẩn, hiện khi chọn dòng
             ),
@@ -86,6 +93,29 @@ def layout_home():
             message='Bạn có chắc chắn muốn xóa bản ghi này không? Hành động này không thể hoàn tác.',
         ),
         
+        html.Div(id="modal-edit-rec", children=[
+            html.Div([
+                html.H3("Chỉnh sửa thông tin bản ghi", style={"marginTop": 0, "borderBottom": "1px solid #eee", "paddingBottom": "10px"}),
+                
+                html.Label("Tên bệnh nhân:", style={"fontWeight": "bold"}),
+                dcc.Input(id="edit-patient-name", type="text", style={"width": "100%", "marginBottom": "10px", "padding": "8px"}),
+                
+                html.Label("Mã bệnh nhân (ID):", style={"fontWeight": "bold"}),
+                dcc.Input(id="edit-patient-code", type="text", style={"width": "100%", "marginBottom": "10px", "padding": "8px"}),
+                
+                html.Label("Ngày khám (Ngày & Giờ):", style={"fontWeight": "bold"}),
+                dcc.Input(id="edit-visit-date", type="text", placeholder="DD/MM/YYYY HH:mm", style={"width": "100%", "marginBottom": "10px", "padding": "8px"}),
+                
+                html.Label("Tên bài đo:", style={"fontWeight": "bold"}),
+                dcc.Input(id="edit-test-name", type="text", style={"width": "100%", "marginBottom": "20px", "padding": "8px"}),
+                
+                html.Div([
+                    html.Button("Hủy bỏ", id="btn-cancel-edit", style={"marginRight": "10px", "padding": "8px 15px", "background": "#9ca3af", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"}),
+                    html.Button("Lưu thay đổi", id="btn-save-edit", style={"padding": "8px 15px", "background": "#2563eb", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"})
+                ], style={"textAlign": "right"})
+            ], style={"backgroundColor": "white", "padding": "25px", "borderRadius": "8px", "width": "400px", "boxShadow": "0 4px 15px rgba(0,0,0,0.2)"})
+        ], style={"display": "none", "position": "fixed", "top": 0, "left": 0, "width": "100%", "height": "100%", "backgroundColor": "rgba(0,0,0,0.5)", "justifyContent": "center", "alignItems": "center", "zIndex": 2000}),
+
         dash_table.DataTable(
             id="table-recordings",
             columns=[
@@ -422,39 +452,99 @@ def display_page(path):
     Output('table-recordings', 'data'),
     Input('upload-data', 'contents'),
     Input('search-input', 'value'),
+    Input("confirm-delete-dialog", "submit_n_clicks"),
     State('upload-data', 'filename'),
     prevent_initial_call=True
 )
-def update_table(contents, search, filenames):
+def update_table(contents, search, submit_delete, filenames):
     ctx = callback_context
-    errors = []
     if ctx.triggered and "upload-data" in ctx.triggered[0]['prop_id'] and contents:
         save_dir = get_base_path() / "data_raw" / "imported"
         save_dir.mkdir(parents=True, exist_ok=True)
+        
+        count_success = 0
+        count_new_file = 0
+        count_reused = 0
+        errors = []
         
         for content, name in zip(contents, filenames):
             try:
                 content_type, content_string = content.split(',')
                 decoded = base64.b64decode(content_string)
-                text = decoded.decode('utf-16')
                 
-                data = parse_natus_content(text)
-                p_info = data['patient_info']
+                text_content = ""
+                try:
+                    text_content = decoded.decode('utf-16')
+                except UnicodeDecodeError:
+                    try:
+                        text_content = decoded.decode('utf-8')
+                    except:
+                        errors.append(f"❌ {name}: Không đọc được file !")
+                        continue
+
+                # Gọi hàm kiểm tra cấu trúc
+                if not validate_natus_structure(text_content):
+                    errors.append(f"⚠️ {name}: Nội dung không hợp lệ . Đã bỏ qua.")
+                    continue
+
+                file_hash = hashlib.md5(decoded).hexdigest()
                 
-                p_id = add_patient_if_not_exists(p_info.get('patient_id', 'UNK'), p_info.get('first_name', 'Unknown'))
-                
-                safe_name = f"{int(time.time())}_{name}"
+                original_ext = Path(name).suffix
+                safe_name = f"{file_hash}{original_ext}" 
                 f_path = save_dir / safe_name
-                with open(f_path, "w", encoding="utf-16") as f: f.write(text)
                 
-                add_recording(p_id, p_info.get('visit_date'), p_info.get('test_name'), str(f_path))
-                success_count += 1
-            except ValueError as ve:
-                errors.append(html.P(f"❌ {name}: {str(ve)}", style={'color': 'red'}))
+                is_file_saved = False
+                
+                if not f_path.exists():
+                    with open(f_path, "wb") as f:
+                        f.write(decoded)
+                    is_file_saved = True
+                    count_new_file += 1
+                else:
+                    count_reused += 1
+
+                data = parse_natus_content(text_content)
+                p_info = data.get('patient_info', {})
+                
+                p_id = add_patient_if_not_exists(
+                    p_info.get('patient_id', 'UNK'), 
+                    p_info.get('first_name', 'Unknown')
+                )
+                
+                add_recording(
+                    p_id, 
+                    p_info.get('visit_date', 'N/A'), 
+                    p_info.get('test_name', 'Imported'), 
+                    str(f_path)
+                )
+                
+                count_success += 1
+                
             except Exception as e:
-                errors.append(html.P(f"❌ {name}: Lỗi xử lý ({str(e)})", style={'color': 'red'}))
+                print(f"Lỗi import {name}: {e}")
+                errors.append(f"❌ {name}: Lỗi hệ thống ({str(e)})")
+        
+        status_parts = []
+        if count_success > 0:
+            msg = f"✅ Đã xử lý {count_success} bản ghi "
+            detail = []
+            if count_new_file > 0: detail.append(f"Lưu mới: {count_new_file}")
+            if count_reused > 0: detail.append(f"Dùng lại file cũ: {count_reused}")
             
-    # Handle Search & Refresh
+            msg += f"({', '.join(detail)})"
+            status_parts.append(html.Span(msg, style={'color': 'green', 'fontWeight': 'bold'}))
+        
+        if errors:
+            status_parts.append(html.Br())
+            for err in errors:
+                status_parts.append(html.Div(err, style={'color': 'red', 'fontSize': '0.9em'}))
+        
+        status_msg = status_parts if status_parts else "⚠️ Không có file nào hợp lệ."
+        
+        all_recs = get_all_recordings()
+        rows = [{"id": r["id"], "date": r["visit_date"], "patient": f"{r['full_name']} ({r['patient_code']})", "test": r["test_name"], "action": f"[Xem chi tiết](/analysis/{r['id']})"} for r in all_recs]
+        return status_msg, rows
+
     all_recs = get_all_recordings()
     rows = [{"id": r["id"], "date": r["visit_date"], "patient": f"{r['full_name']} ({r['patient_code']})", "test": r["test_name"], "action": f"[Xem chi tiết](/analysis/{r['id']})"} for r in all_recs]
     
@@ -462,7 +552,7 @@ def update_table(contents, search, filenames):
         s = search.lower()
         rows = [r for r in rows if s in r['patient'].lower()]
         
-    return " File dữ liệu này đã được xử lý, hãy kiểm tra danh sách", rows
+    return no_update, rows
 
 @app.callback(
     Output("modal-create-label", "style"),
@@ -615,15 +705,21 @@ def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_
 
 @app.callback(
     Output("btn-delete-rec", "style"),
+    Output("btn-edit-rec", "style"),
     Input("table-recordings", "selected_rows")
 )
-def toggle_delete_button(selected_rows):
-    base_style = {"marginLeft": "10px", "padding": "8px 15px", "background": "#ef4444", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"}
+def toggle_buttons(selected_rows):
+    base_del = {"marginLeft": "10px", "padding": "8px 15px", "background": "#ef4444", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"}
+    base_edit = {"marginLeft": "10px", "padding": "8px 15px", "background": "#f59e0b", "color": "white", "border": "none", "borderRadius": "4px", "cursor": "pointer"}
+    
     if selected_rows:
-        base_style["display"] = "block"
+        base_del["display"] = "block"
+        base_edit["display"] = "block"
     else:
-        base_style["display"] = "none"
-    return base_style
+        base_del["display"] = "none"
+        base_edit["display"] = "none"
+        
+    return base_del, base_edit
 
 @app.callback(
     Output("confirm-delete-dialog", "displayed"),
@@ -683,6 +779,73 @@ def save_conclusion(n_clicks, rec_id, text):
     if not rec_id: return no_update
     update_recording_conclusion(rec_id, text)
     return "✅ Đã lưu kết luận vào hồ sơ!"
+
+@app.callback(
+    Output("modal-edit-rec", "style"),
+    Output("table-recordings", "data", allow_duplicate=True),
+    Output("table-recordings", "selected_rows", allow_duplicate=True),
+
+    Output("edit-patient-name", "value"),
+    Output("edit-patient-code", "value"),
+    Output("edit-visit-date", "value"),
+    Output("edit-test-name", "value"),
+    
+    Input("btn-edit-rec", "n_clicks"),
+    Input("btn-save-edit", "n_clicks"),
+    Input("btn-cancel-edit", "n_clicks"),
+    
+    State("table-recordings", "selected_rows"),
+    State("table-recordings", "data"),
+    State("edit-patient-name", "value"),
+    State("edit-patient-code", "value"),
+    State("edit-visit-date", "value"),
+    State("edit-test-name", "value"),
+    
+    prevent_initial_call=True
+)
+def manage_edit_modal(n_edit, n_save, n_cancel, selected_indices, rows, 
+                      new_p_name, new_p_code, new_date, new_test):
+    ctx = callback_context
+    if not ctx.triggered: return no_update
+    trigger_id = ctx.triggered[0]['prop_id']
+    
+    show_style = {"display": "flex", "position": "fixed", "top": 0, "left": 0, "width": "100%", "height": "100%", "backgroundColor": "rgba(0,0,0,0.5)", "justifyContent": "center", "alignItems": "center", "zIndex": 2000}
+    hide_style = {"display": "none"}
+
+    if "btn-edit-rec" in trigger_id and selected_indices:
+        idx = selected_indices[0]
+        row = rows[idx]
+        rec_id = row['id']
+        
+        rec_detail = get_recording_by_id(rec_id)
+        
+        return (
+            show_style, no_update, no_update,
+            rec_detail['full_name'],
+            rec_detail['patient_code'],
+            rec_detail['visit_date'],
+            rec_detail['test_name']
+        )
+
+    if "btn-save-edit" in trigger_id and selected_indices:
+        idx = selected_indices[0]
+        rec_id = rows[idx]['id']
+        
+        success, msg = update_recording_metadata(rec_id, new_date, new_test, new_p_name, new_p_code)
+        
+        if success:
+            new_recs = get_all_recordings()
+            new_rows = [{"id": r["id"], "date": r["visit_date"], "patient": f"{r['full_name']} ({r['patient_code']})", "test": r["test_name"], "action": f"[Xem chi tiết](/analysis/{r['id']})"} for r in new_recs]
+            
+            return hide_style, new_rows, [], "", "", "", ""
+        else:
+            print(msg)
+            return hide_style, no_update, no_update, no_update, no_update, no_update, no_update
+
+    if "btn-cancel-edit" in trigger_id:
+        return hide_style, no_update, no_update, "", "", "", ""
+
+    return hide_style, no_update, no_update, no_update, no_update, no_update, no_update
 
 if __name__ == "__main__":
     app.run(debug=False, port=8051)

@@ -157,3 +157,15 @@ def get_downsampled_data(file_path, max_points=5000):
     ds_times = np.arange(len(ds_vals), dtype=float) * dt_ms * step
     
     return ds_times, ds_vals, boundaries
+
+def validate_natus_structure(content_str: str) -> bool:
+    if not content_str:
+        return False
+    
+    required_keywords = ["Patient ID", "Sweep Data", "EMG", "EEG", "ECG", "Sampling Frequency", "Sampling Rate", "Channel Labels"]
+    
+    for keyword in required_keywords:
+        if keyword in content_str:
+            return True
+            
+    return False

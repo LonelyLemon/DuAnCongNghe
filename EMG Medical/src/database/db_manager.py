@@ -226,3 +226,34 @@ def update_recording_conclusion(rec_id, text):
     cur.execute("UPDATE recordings SET clinical_conclusion = ? WHERE id = ?", (text, rec_id))
     conn.commit()
     conn.close()
+
+def update_recording_metadata(rec_id, new_visit_date, new_test_name, new_patient_name, new_patient_code):
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("SELECT patient_id FROM recordings WHERE id = ?", (rec_id,))
+        row = cur.fetchone()
+        if not row: return False, "Không tìm thấy bản ghi"
+        
+        p_id = row['patient_id']
+        
+        cur.execute('''
+            UPDATE recordings 
+            SET visit_date = ?, test_name = ? 
+            WHERE id = ?
+        ''', (new_visit_date, new_test_name, rec_id))
+        
+        cur.execute('''
+            UPDATE patients 
+            SET full_name = ?, patient_code = ? 
+            WHERE id = ?
+        ''', (new_patient_name, new_patient_code, p_id))
+        
+        conn.commit()
+        return True, "Cập nhật thành công"
+    except Exception as e:
+        print(f"Lỗi Update DB: {e}")
+        return False, str(e)
+    finally:
+        conn.close()

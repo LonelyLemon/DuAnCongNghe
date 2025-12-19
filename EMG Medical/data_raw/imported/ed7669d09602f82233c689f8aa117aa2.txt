@@ -1,0 +1,9 @@
+1. Các thông tin vẫn sẽ được tự tạo như hiện tại nhưng tôi muốn thêm chức năng edit thông tin bản ghi. Các thông tin được phép edit của bản ghi bao gồm:
+  - Thông tin bệnh nhân
+  - Ngày khám (Bao gồm có ngày và giờ)
+  - Tên bài đo
+2. Kiểm tra lỗi sau: Khi upload một file .txt với nội dung không liên quan (Ví dụ: Làm thơ, file text ghi chú,...), mặc dù ở giao diện sẽ không hiển thị file này lên danh sách bản ghi, tuy nhiên chương trình vẫn thông báo lại "File dữ liệu này đã được xử lý, hãy kiểm tra danh sách" và file đó vẫn được lưu vào trong data_raw/imported. Kỳ vọng của tôi là khi upload file không liên quan, ứng dụng phải thông báo rằng "Nội dung file không hợp lệ ! Hãy Upload file có nội dung liên quan." và không lưu trữ file trong data_raw/imported.
+3. Hiện tại dữ liệu đang được xử lý để lưu trữ trong data_raw/imported mỗi khi thực hiện upload một file. Điều này có tối ưu không, phương án tốt hơn là gì ?
+4. Xem xét, đánh giá và nêu phương án xử lý cho vấn đề sau: Hiện tại ứng dụng chỉ xử lý file dữ liệu dạng .txt với format dữ liệu bên trong chứa các thông tin như hiện tại. Câu hỏi là:
+  + Có nên thực hiện phát triển chức năng cho phép ứng dụng xử lý cả file ở định dạng .csv hay không ?
+  + Vì file .csv về dữ liệu EMG có format muôn hình vạn trạng, nên ta phải quy định một format chuẩn cho input file đầu vào. Vì vậy ta sẽ tạo một file mẫu với cấu trúc tương tự Le Thi Bop.txt để hướng dẫn người dùng cấu trúc lại file dữ liệu theo cách này ? Ý tưởng này như thế nào ?
