@@ -290,6 +290,7 @@ def layout_analysis(rec_id):
         dcc.Store(id="current-file-path", data=str(file_path)),
         dcc.Store(id="current-boundaries", data=boundaries),
         dcc.Store(id="current-dt-ms", data=dt_ms),
+        dcc.Store(id="current-tech-info", data=tech_info),
         
         # Update: Hiển thị thông số kỹ thuật
         html.Div(id="modal-tech-info", children=[
@@ -324,10 +325,25 @@ def layout_analysis(rec_id):
             # FILTER CONTROLS
             html.Div([
                 html.Label("Bộ lọc tín hiệu (DSP):", style={"fontWeight": "bold", "display": "block", "marginBottom": "5px"}),
-                dcc.Checklist(
-                    id="dsp-filters-checklist",
+                
+                # 1. Notch Filter Dropdown
+                html.Label("Khử nhiễu nguồn (Notch):", style={"fontSize": "13px", "fontWeight": "600", "color": "#374151"}),
+                dcc.Dropdown(
+                    id="notch-filter-dropdown",
                     options=[
-                        {'label': ' Khử nhiễu nguồn (Notch 50Hz)', 'value': 'NOTCH'},
+                        {'label': '🚫 Tắt (Off)', 'value': 'OFF'},
+                        {'label': '⚡ 50Hz (VN/EU)', 'value': '50'},
+                        {'label': '⚡ 60Hz (US/JP)', 'value': '60'}
+                    ],
+                    value='OFF',
+                    clearable=False,
+                    style={"marginBottom": "10px", "fontSize": "13px"}
+                ),
+
+                # 2. Bandpass Filter Checkbox
+                dcc.Checklist(
+                    id="bandpass-filter-checklist",
+                    options=[
                         {'label': ' Lọc thông dải (Bandpass 20-500Hz)', 'value': 'BANDPASS'},
                     ],
                     value=[],
@@ -437,13 +453,14 @@ def create_initial_figure(time, voltage, bounds):
 @app.callback(
     Output("analysis-graph", "figure"),
     Input("analysis-graph", "relayoutData"),
-    Input("dsp-filters-checklist", "value"),
+    Input("notch-filter-dropdown", "value"),
+    Input("bandpass-filter-checklist", "value"),
     State("analysis-graph", "figure"),
     State("current-file-path", "data"),
     State("current-dt-ms", "data"),
     prevent_initial_call=True
 )
-def update_graph_content(relayout, active_filters, fig, file_path, dt_ms):
+def update_graph_content(relayout, notch_val, bandpass_val, fig, file_path, dt_ms):
     if not file_path: return no_update
     
     try: fig["layout"]["xaxis"]["rangeslider"]["yaxis"].pop("_template", None)
@@ -480,9 +497,14 @@ def update_graph_content(relayout, active_filters, fig, file_path, dt_ms):
         processed_vals = hr_vals.copy()
         slice_dt = (hr_time[1] - hr_time[0]) if len(hr_time) > 1 else dt_ms
         
-        if active_filters:
-            if "NOTCH" in active_filters: processed_vals = apply_notch_filter(processed_vals, slice_dt)
-            if "BANDPASS" in active_filters: processed_vals = apply_bandpass_filter(processed_vals, slice_dt)
+        # 1. Xử lý Notch Filter (theo tần số chọn)
+        if notch_val and notch_val != 'OFF':
+            freq = float(notch_val)
+            processed_vals = apply_notch_filter(processed_vals, slice_dt, freq=freq)
+            
+        # 2. Xử lý Bandpass
+        if bandpass_val and "BANDPASS" in bandpass_val:
+            processed_vals = apply_bandpass_filter(processed_vals, slice_dt)
             
         mask = (hr_time >= start_ms) & (hr_time <= end_ms)
         plot_time = hr_time[mask]
@@ -491,7 +513,8 @@ def update_graph_content(relayout, active_filters, fig, file_path, dt_ms):
         if len(new_fig.data) > 0:
             new_fig.data[0].x = plot_time
             new_fig.data[0].y = plot_vals
-            new_fig.data[0].line.color = "#059669" if active_filters else "#1f2937"
+            is_filtering = (notch_val != 'OFF') or (bandpass_val and "BANDPASS" in bandpass_val)
+            new_fig.data[0].line.color = "#059669" if is_filtering else "#1f2937"
             new_fig.data[0].name = "Detail (High-Res)"
     else:
         if len(new_fig.data) > 0:
@@ -507,21 +530,25 @@ def update_graph_content(relayout, active_filters, fig, file_path, dt_ms):
     Output("temp-stats-store", "data"),
     Input("analysis-graph", "relayoutData"),
     State("current-file-path", "data"),
-    State("dsp-filters-checklist", "value"),
+    Input("notch-filter-dropdown", "value"),
+    Input("bandpass-filter-checklist", "value"),
     prevent_initial_call=True
 )
-def update_stats(relayout, file_path, active_filters):
-    if not relayout or "shapes" not in relayout: return no_update, no_update
+def update_stats(relayout, file_path, notch_val, bandpass_val):
+    if not relayout or "shapes" not in relayout: 
+        return no_update, no_update
     
     shape = relayout["shapes"][-1]
     x0, x1 = shape["x0"], shape["x1"]
     s, e = sorted([float(x0), float(x1)])
     
     t, v = get_data_slice(Path(file_path), s, e)
-    if active_filters:
-        dt = (t[1]-t[0]) if len(t)>1 else 0.02
-        if "NOTCH" in active_filters: v = apply_notch_filter(v, dt)
-        if "BANDPASS" in active_filters: v = apply_bandpass_filter(v, dt)
+
+    dt = (t[1]-t[0]) if len(t)>1 else 0.02
+    if notch_val and notch_val != 'OFF':
+        v = apply_notch_filter(v, dt, freq=float(notch_val))
+    if bandpass_val and "BANDPASS" in bandpass_val:
+        v = apply_bandpass_filter(v, dt)
         
     stats = calculate_clinical_stats(t, v)
     return f"P2P: {stats['p2p_uv']}µV | RMS: {stats['rms_uv']}µV", {"start": s, "end": e, "stats": stats}
@@ -709,10 +736,11 @@ def handle_modal(n_open, n_cancel, n_confirm, code, name, current_options):
     State("label-type-dd", "value"),
     State("current-file-path", "data"),
     State("current-boundaries", "data"),
-    State("dsp-filters-checklist", "value"),
+    State("notch-filter-dropdown", "value"),
+    State("bandpass-filter-checklist", "value"),
     prevent_initial_call=True
 )
-def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_path, boundaries, active_filters):
+def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_path, boundaries, notch_val, bandpass_val):
     ctx = callback_context
     if not ctx.triggered: 
         return no_update, no_update, no_update
@@ -743,9 +771,11 @@ def batch_save_and_manage(n_save, rec_id, n_del, n_clear, fig, label_type, file_
                 t_arr, v_arr = get_data_slice(Path(file_path), s, e)
                 
                 dt = (t_arr[1]-t_arr[0]) if len(t_arr)>1 else 0.02
-                if active_filters:
-                    if "NOTCH" in active_filters: v_arr = apply_notch_filter(v_arr, dt)
-                    if "BANDPASS" in active_filters: v_arr = apply_bandpass_filter(v_arr, dt)
+
+                if notch_val and notch_val != 'OFF':
+                    v_arr = apply_notch_filter(v_arr, dt, freq=float(notch_val))
+                if bandpass_val and "BANDPASS" in bandpass_val:
+                    v_arr = apply_bandpass_filter(v_arr, dt)
                 
                 stats = calculate_clinical_stats(t_arr, v_arr)
                 
@@ -1007,10 +1037,12 @@ def toggle_chat_window(n_open, n_close, current_style):
     State("chat-input", "value"),
     State("chat-history", "children"),
     State("temp-stats-store", "data"),
+    State("current-tech-info", "data"),
     prevent_initial_call=True
 )
-def process_chat_message(n_clicks, n_submit, user_text, current_history, stats_data):
-    if not user_text: return no_update, no_update
+def process_chat_message(n_clicks, n_submit, user_text, current_history, stats_data, tech_data):
+    if not user_text: 
+        return no_update, no_update
 
     user_msg_div = html.Div(user_text, style={
         "backgroundColor": "#dbeafe", "padding": "8px", "borderRadius": "5px", 
@@ -1018,17 +1050,37 @@ def process_chat_message(n_clicks, n_submit, user_text, current_history, stats_d
     })
     current_history.append(user_msg_div)
 
-    context_info = None
+    context_parts = []
+
+    if tech_data:
+        tech_str = "--- THÔNG SỐ KỸ THUẬT MÁY ĐO ---\n"
+        vn_map = {
+            "sampling_rate": "Tần số lấy mẫu",
+            "low_filter": "Lọc thông cao (Low Cut)",
+            "high_filter": "Lọc thông thấp (High Cut)",
+            "notch_filter": "Lọc nhiễu nguồn (Notch)",
+            "amp_range": "Dải biên độ"
+        }
+        for k, v in tech_data.items():
+            if v:
+                key_vn = vn_map.get(k, k)
+                tech_str += f"- {key_vn}: {v}\n"
+        context_parts.append(tech_str)
+
     if stats_data:
         s = stats_data.get("stats", {})
-        context_info = f"""
-        - Dữ liệu vùng chọn: {stats_data.get('start'):.1f}ms đến {stats_data.get('end'):.1f}ms
+        stats_str = f"""
+        --- DỮ LIỆU VÙNG ĐANG CHỌN ---
+        - Thời gian: {stats_data.get('start'):.1f}ms đến {stats_data.get('end'):.1f}ms
         - P2P (Biên độ đỉnh-đỉnh): {s.get('p2p_uv')} µV
         - RMS (Hiệu dụng): {s.get('rms_uv')} µV
-        - Diện tích (Area): {s.get('area_uvms')} µV.ms
+        - Diện tích: {s.get('area_uvms')} µV.ms
         """
+        context_parts.append(stats_str)
     
-    ai_response_text = ask_gemini_medical(user_text, context_info)
+    full_context = "\n".join(context_parts) if context_parts else None
+
+    ai_response_text = ask_gemini_medical(user_text, full_context)
 
     ai_msg_div = html.Div(dcc.Markdown(ai_response_text), style={
         "backgroundColor": "#f3f4f6", "padding": "8px", "borderRadius": "5px", 

@@ -13,7 +13,7 @@ genai.configure(api_key=API_KEY)
 
 APP_MANUAL = """
 THÔNG TIN VỀ ỨNG DỤNG "EMG LAB PRO":
-1. Chức năng chính: Quản lý và phân tích tín hiệu điện cơ (EMG/NCS) từ máy Natus.
+1. Chức năng chính: Quản lý và phân tích tín hiệu điện cơ (EMG) từ máy Natus.
 2. Tải dữ liệu: Kéo thả file .txt vào khung upload ở Trang chủ. Hỗ trợ import nhiều file cùng lúc.
 3. Tìm kiếm & Quản lý: 
    - Ô tìm kiếm ở trang chủ dùng để lọc bệnh nhân theo tên.
